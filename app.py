@@ -1,5 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
+import google.ai.generativelanguage as gql
 
 # --- הגדרת המפתח שלך ---
 # וודא שהמפתח שלך נשאר בתוך המרכאות
@@ -16,31 +17,35 @@ file = st.file_uploader("בחר קובץ (PDF או תמונה)", type=['png', 'j
 if file:
     st.info("מנתח נתונים, אנא המתן...")
     try:
-        # תיקון השגיאה: שימוש בשם המודל המדויק ללא גרסאות בטא
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        # תיקון שגיאת ה-404 על ידי הגדרת גרסת ה-API הנכונה
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         doc_data = file.read()
         
         prompt = """
-        Analyze the management fees (דמי ניהול) in the attached document:
-        1. From deposit (הפקדה) - threshold is 1%.
-        2. From accumulation (צבירה) - threshold is 0.145%.
+        נתח את דמי הניהול בטבלה שבמסמך המצורף.
+        תנאי הסף שלך הם:
+        1. דמי ניהול מהפקדה - מעל 1% נחשב גבוה.
+        2. דמי ניהול מצבירה - מעל 0.145% נחשב גבוה.
         
-        Return the answer in Hebrew:
-        - If both are above threshold: 'דמי הניהול גבוהים'
-        - If only one is above: 'דמי הניהול סבירים'
-        - If both are below/equal: 'דמי הניהול מעולים'
-        Include the exact percentages you found.
+        החזר תשובה בעברית ברורה הכוללת:
+        - שורה תחתונה: 'גבוה', 'סביר' או 'מעולה'.
+        - מהם האחוזים המדויקים שמצאת עבור הפקדה וצבירה.
         """
         
-        # שליחה ל-Gemini
-        response = model.generate_content([
-            prompt,
-            {"mime_type": file.type, "data": doc_data}
-        ])
+        # שימוש בגרסת v1beta כדי לאפשר קריאת קבצים ישירה
+        response = model.generate_content(
+            [
+                prompt,
+                {"mime_type": file.type, "data": doc_data}
+            ],
+            generation_config={"top_p": 1, "top_k": 32}
+        )
         
         st.success("הנה הניתוח המהיר:")
         st.write(response.text)
         
     except Exception as e:
-        st.error(f"אירעה שגיאה בניתוח הקובץ: {e}")
+        # אם יש שגיאה, נציג אותה בצורה ברורה
+        st.error(f"אירעה שגיאה: {e}")
+        st.info("נסה להעלות צילום מסך (תמונה) במקום PDF אם הבעיה נמשכת.")
