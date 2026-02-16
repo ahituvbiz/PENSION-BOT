@@ -1,51 +1,51 @@
 import streamlit as st
 import google.generativeai as genai
-import google.ai.generativelanguage as gql
+import pypdf
 
 # --- הגדרת המפתח שלך ---
-# וודא שהמפתח שלך נשאר בתוך המרכאות
 API_KEY = "AIzaSyBrvKibfRFWjnmSm4LTFHtaqLEoZZVcrgU"
-
 genai.configure(api_key=API_KEY)
 
 st.set_page_config(page_title="בודק הפנסיה - pensya.info", layout="centered")
 st.title("🔍 בודק דמי ניהול אוטומטי")
-st.write("העלה צילום מסך או קובץ PDF של טבלת דמי הניהול מהדוח")
+st.write("העלה דוח שנתי או רבעוני (PDF או תמונה)")
 
-file = st.file_uploader("בחר קובץ (PDF או תמונה)", type=['png', 'jpg', 'jpeg', 'pdf'])
+file = st.file_uploader("בחר קובץ", type=['png', 'jpg', 'jpeg', 'pdf'])
 
 if file:
     st.info("מנתח נתונים, אנא המתן...")
     try:
-        # תיקון שגיאת ה-404 על ידי הגדרת גרסת ה-API הנכונה
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        doc_data = file.read()
+        content_to_analyze = []
         
+        if file.type == "application/pdf":
+            # קריאת טקסט מתוך ה-PDF בצורה ישירה
+            reader = pypdf.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text()
+            content_to_analyze.append(f"נתח את נתוני דמי הניהול מהטקסט הבא:\n\n{text}")
+        else:
+            # טיפול בתמונה
+            from PIL import Image
+            img = Image.open(file)
+            content_to_analyze.append("נתח את דמי הניהול בתמונה המצורפת:")
+            content_to_analyze.append(img)
+
         prompt = """
-        נתח את דמי הניהול בטבלה שבמסמך המצורף.
-        תנאי הסף שלך הם:
-        1. דמי ניהול מהפקדה - מעל 1% נחשב גבוה.
-        2. דמי ניהול מצבירה - מעל 0.145% נחשב גבוה.
+        משימה: מצא את דמי הניהול בדו"ח.
+        1. דמי ניהול מהפקדה (מעל 1% זה גבוה).
+        2. דמי ניהול מצבירה (מעל 0.145% זה גבוה).
         
-        החזר תשובה בעברית ברורה הכוללת:
-        - שורה תחתונה: 'גבוה', 'סביר' או 'מעולה'.
-        - מהם האחוזים המדויקים שמצאת עבור הפקדה וצבירה.
+        החזר תשובה בעברית: האם הם גבוהים, סבירים או מעולים, ופרט את האחוזים שמצאת.
         """
         
-        # שימוש בגרסת v1beta כדי לאפשר קריאת קבצים ישירה
-        response = model.generate_content(
-            [
-                prompt,
-                {"mime_type": file.type, "data": doc_data}
-            ],
-            generation_config={"top_p": 1, "top_k": 32}
-        )
+        content_to_analyze.insert(0, prompt)
+        response = model.generate_content(content_to_analyze)
         
-        st.success("הנה הניתוח המהיר:")
+        st.success("תוצאת הבדיקה:")
         st.write(response.text)
         
     except Exception as e:
-        # אם יש שגיאה, נציג אותה בצורה ברורה
-        st.error(f"אירעה שגיאה: {e}")
-        st.info("נסה להעלות צילום מסך (תמונה) במקום PDF אם הבעיה נמשכת.")
+        st.error(f"שגיאה בניתוח: {e}")
