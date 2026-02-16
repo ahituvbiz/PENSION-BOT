@@ -3,6 +3,7 @@ import google.generativeai as genai
 import pypdf
 
 # --- הגדרת המפתח שלך ---
+# החלף את הטקסט במרכאות במפתח ה-API האמיתי שלך
 API_KEY = "AIzaSyBrvKibfRFWjnmSm4LTFHtaqLEoZZVcrgU"
 genai.configure(api_key=API_KEY)
 
@@ -17,32 +18,22 @@ if file:
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        content_to_analyze = []
-        
+        # זיהוי סוג הקובץ וקריאת התוכן
         if file.type == "application/pdf":
-            # קריאת טקסט מתוך ה-PDF בצורה ישירה
+            # קריאת טקסט ישירות מה-PDF - עוקף את שגיאת ה-404
             reader = pypdf.PdfReader(file)
-            text = ""
+            pdf_text = ""
             for page in reader.pages:
-                text += page.extract_text()
-            content_to_analyze.append(f"נתח את נתוני דמי הניהול מהטקסט הבא:\n\n{text}")
+                pdf_text += page.extract_text()
+            
+            prompt = f"מתוך הטקסט הבא של דוח פנסיוני, מצא את דמי הניהול מהפקדה ומצבירה. אם דמי הניהול מהפקדה מעל 1% או מצבירה מעל 0.145%, ציין שהם גבוהים. החזר תשובה בעברית הכוללת את המספרים שנמצאו:\n\n{pdf_text}"
+            response = model.generate_content(prompt)
         else:
-            # טיפול בתמונה
+            # טיפול בתמונה (צילום מסך)
             from PIL import Image
             img = Image.open(file)
-            content_to_analyze.append("נתח את דמי הניהול בתמונה המצורפת:")
-            content_to_analyze.append(img)
-
-        prompt = """
-        משימה: מצא את דמי הניהול בדו"ח.
-        1. דמי ניהול מהפקדה (מעל 1% זה גבוה).
-        2. דמי ניהול מצבירה (מעל 0.145% זה גבוה).
-        
-        החזר תשובה בעברית: האם הם גבוהים, סבירים או מעולים, ופרט את האחוזים שמצאת.
-        """
-        
-        content_to_analyze.insert(0, prompt)
-        response = model.generate_content(content_to_analyze)
+            prompt = "נתח את דמי הניהול בתמונה המצורפת: הפקדה (מעל 1% זה גבוה) וצבירה (מעל 0.145% זה גבוה). החזר תשובה בעברית עם האחוזים שמצאת."
+            response = model.generate_content([prompt, img])
         
         st.success("תוצאת הבדיקה:")
         st.write(response.text)
