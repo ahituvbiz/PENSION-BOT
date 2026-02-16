@@ -9,31 +9,28 @@ genai.configure(api_key=API_KEY)
 
 st.set_page_config(page_title="בודק הפנסיה - pensya.info", layout="centered")
 st.title("🔍 בודק דמי ניהול אוטומטי")
-st.write("העלה צילום מסך או קובץ PDF של טבלת דמי הניהול מהדוח השנתי")
+st.write("העלה צילום מסך או קובץ PDF של טבלת דמי הניהול מהדוח")
 
 file = st.file_uploader("בחר קובץ (PDF או תמונה)", type=['png', 'jpg', 'jpeg', 'pdf'])
 
 if file:
     st.info("מנתח נתונים, אנא המתן...")
     try:
-        # הגדרת המודל
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # תיקון השגיאה: שימוש בשם המודל המדויק ללא גרסאות בטא
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
         
-        # קריאת תוכן הקובץ
         doc_data = file.read()
         
-        # בניית הבקשה לבינה המלאכותית
         prompt = """
-        נתח את דמי הניהול בטבלה שבמסמך המצורף:
-        1. דמי ניהול מהפקדה (הרף הוא 1%).
-        2. דמי ניהול מצבירה (הרף הוא 0.145%).
+        Analyze the management fees (דמי ניהול) in the attached document:
+        1. From deposit (הפקדה) - threshold is 1%.
+        2. From accumulation (צבירה) - threshold is 0.145%.
         
-        החזר תשובה בעברית ברורה:
-        - אם שניהם מעל הרף: 'דמי הניהול גבוהים'.
-        - אם רק אחד מעל הרף: 'דמי הניהול סבירים'.
-        - אם שניהם מתחת או שווים לרף: 'דמי הניהול מעולים'.
-        
-        ציין בקצרה את האחוזים שמצאת במסמך.
+        Return the answer in Hebrew:
+        - If both are above threshold: 'דמי הניהול גבוהים'
+        - If only one is above: 'דמי הניהול סבירים'
+        - If both are below/equal: 'דמי הניהול מעולים'
+        Include the exact percentages you found.
         """
         
         # שליחה ל-Gemini
