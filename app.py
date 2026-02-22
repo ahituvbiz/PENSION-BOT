@@ -24,30 +24,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── קבועים ───────────────────────────────────────────
-MAX_FILE_SIZE_MB = 5
-MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+PENSION_INTEREST = 0.0386  # 3.86%
 MAX_TEXT_CHARS = 15_000
-RATE_LIMIT_MAX = 5
-RATE_LIMIT_WINDOW_SEC = 3600
-PENSION_INTEREST = 0.0386  # 3.86% ריבית לחישובים
 
-# ─── אבטחה וחיבור ─────────────────────────────────────
+# ─── חיבור ל-API ─────────────────────────────────────
 try:
     API_KEY = st.secrets["OPENAI_API_KEY"]
     client = OpenAI(api_key=API_KEY, default_headers={"OpenAI-No-Store": "true"})
 except Exception:
-    st.error("⚠️ שגיאה: מפתח ה-API לא נמצא בכספת (Secrets).")
+    st.error("⚠️ מפתח ה-API לא נמצא ב-Secrets.")
     st.stop()
 
-# ─── פונקציות עזר ──────────────────────────────────────
-
-def _get_client_id():
-    headers = st.context.headers if hasattr(st, "context") else {}
-    raw_ip = headers.get("X-Forwarded-For", "") or headers.get("X-Real-Ip", "") or "unknown"
-    return hashlib.sha256(raw_ip.encode()).hexdigest()[:16]
+# ─── פונקציות ולידציה וזיהוי ─────────────────────────────
 
 def is_vector_pdf(pdf_bytes):
-    """בדיקה אם ה-PDF הוא וקטורי (ניתן לחילוץ טקסט)"""
     try:
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
         text = ""
@@ -58,187 +48,139 @@ def is_vector_pdf(pdf_bytes):
         return False
 
 def validate_pension_type(text):
-    """בדיקה אם זה דוח מקוצר של קרן פנסיה מקיפה"""
-    # בדיקה שקיים הביטוי 'בקרן הפנסיה החדשה'
-    if 'בקרן הפנסיה החדשה' not in text:
-        return False, "הרובוט מחווה דעה רק על דוחות מקוצרים של קרן פנסיה מקיפה."
+    """בדיקת סוג דוח לפי כותרת"""
+    header = text[:1500]
+    # בדיקת טקסט רגיל והפוך (RTL)
+    search_text = header + "\n" + "\n".join(line[::-1] for line in header.split("\n"))
     
-    # בדיקה שהמילה 'כללית' לא מופיעה בכותרת (נניח ב-500 התווים הראשונים)
-    header = text[:500]
-    if 'כללית' in header:
+    if 'כללית' in search_text:
         return False, "הרובוט מחווה דעה רק על דוחות מקוצרים של קרן פנסיה מקיפה (ולא פנסיה כללית)."
+    if 'מפורט' in search_text:
+        return False, "הרובוט מחווה דעה רק על דוחות מקוצרים (ולא מפורטים)."
+    if 'בקרן הפנסיה החדשה' not in search_text and 'קרן הפנסיה' not in search_text:
+        return False, "הרובוט מחווה דעה רק על דוחות מקוצרים של קרן פנסיה מקיפה."
     
     return True, ""
 
-def extract_pdf_text(pdf_bytes):
-    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-    full_text = ""
-    for page in reader.pages:
-        t = page.extract_text()
-        if t: full_text += t + "\n"
-    return full_text
+# ─── לוגיקת AI וחילוץ נתונים ──────────────────────────
 
-def anonymize_pii(text: str) -> str:
-    text = re.sub(r"\b\d{7,9}\b", "[ID]", text)
-    text = re.sub(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}\b", "[DATE]", text)
-    return text
-
-# ─── לוגיקה עסקית וחישובים ─────────────────────────────
-
-def calculate_analysis(data, gender, family_status):
-    """ביצוע החישובים לפי הלוגיקה שביקשת"""
+def build_prompt_messages(text):
+    system_prompt = """אתה מחלץ נתונים מדוח פנסיה. החזר JSON בלבד עם השדות הבאים (מספרים בלבד):
+    accumulation (יתרת הכספים בסוף התקופה - טבלה ב),
+    expected_pension (קצבה חודשית צפויה בפרישה גיל 67),
+    disability_release (שחרור מתשלום הפקדות - טבלה א),
+    total_deposits (סה"כ הפקדות בגין התקופה),
+    total_salaries (סה"כ משכורות/שכר מבוטח בגין התקופה),
+    disability_cost (עלות ביטוח נכות - טבלה ב, כמספר חיובי),
+    survivor_cost (עלות ביטוח מוות/שארים - טבלה ב, כמספר חיובי),
+    widow_pension (קצבה חודשית לאלמן/ה),
+    disability_pension (קצבה חודשית בנכות מלאה),
+    report_quarter (1, 2, 3 או 4 אם שנתי)."""
     
-    # 1. אומדן גיל (מבוסס נוסחת NPER - מספר תקופות)
-    # n = log(FV/PV) / log(1+r)
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"נתח את הטקסט הבא:\n\n{text[:MAX_TEXT_CHARS]}"}
+    ]
+
+# ─── חישובים וניתוח לוגי ──────────────────────────────
+
+def perform_analysis(data, gender, family_status):
+    # 1. אומדן גיל (NPER)
     try:
         pv = float(data.get('accumulation', 0))
         fv = float(data.get('expected_pension', 0)) * 190
-        if pv > 0 and fv > 0:
-            years_to_retirement = math.log(fv / pv) / math.log(1 + PENSION_INTEREST)
-            estimated_age = 67 - years_to_retirement
-        else:
-            estimated_age = 0
-            years_to_retirement = 0
+        nper = math.log(fv / pv) / math.log(1 + PENSION_INTEREST)
+        est_age = 67 - nper
     except:
-        estimated_age = 0
-        years_to_retirement = 0
+        return "⚠️ לא ניתן היה לחשב אומדן גיל. וודא שהעלית דוח תקין."
 
-    if estimated_age > 52:
+    if est_age > 52:
         return "הרובוט עוד צעיר ועדיין לא למד לחוות דעה על דוחות של אנשים שיכולים לפרוש בתוך פחות מ-10 שנים. בעתיד הרובוט רוצה ללמוד לעזור גם להם."
 
     # 2. הכנסה מבוטחת
     try:
-        disability_release = float(data.get('disability_release', 0))
-        total_deposits = float(data.get('total_deposits', 1))
-        total_salaries = float(data.get('total_salaries', 1))
-        
-        rep_deposit = disability_release / 0.94
-        deposit_rate = total_deposits / total_salaries
-        insured_salary = rep_deposit / deposit_rate
+        release = float(data.get('disability_release', 0))
+        rep_deposit = release / 0.94
+        dep_rate = float(data.get('total_deposits', 1)) / float(data.get('total_salaries', 1))
+        insured_salary = rep_deposit / dep_rate
     except:
         insured_salary = 0
 
-    # 3. בחינת כיסוי ביטוחי
-    lines = []
-    lines.append(f"### 📊 נתוני רקע שחושבו:")
-    lines.append(f"- גיל משוער: **{estimated_age:.1f}**")
+    lines = [f"### 📋 ניתוח נתונים משוערים:"]
+    lines.append(f"- גיל משוער: **{est_age:.1f}**")
     lines.append(f"- שכר מבוטח מוערך: **₪{insured_salary:,.0f}**")
     lines.append("---")
 
-    is_active = float(data.get('disability_cost', 0)) > 0
-    if not is_active:
-        return "❌ **קרן הפנסיה איננה פעילה ואין לך דרכה כיסויים ביטוחיים!** ממליץ לשקול לנייד את הכספים לקרן הפנסיה הפעילה שלך."
+    # 3. בחינת כיסוי ביטוחי
+    dis_cost = float(data.get('disability_cost', 0))
+    if dis_cost <= 0:
+        return "🔴 **קרן הפנסיה איננה פעילה ואין לך דרכה כיסויים ביטוחיים!** מומלץ לנייד את הכספים לקרן פעילה."
 
-    # עלות ביטוח שארים שנתית (התאמה לפי רבעון)
-    survivor_cost = abs(float(data.get('survivor_cost', 0)))
-    quarter = data.get('report_quarter', 4) # ברירת מחדל שנתי
-    multiplier = {1: 4, 2: 2, 3: 1.333, 4: 1}.get(quarter, 1)
-    annual_survivor_cost = survivor_cost * multiplier
+    surv_cost = float(data.get('survivor_cost', 0))
+    q = data.get('report_quarter', 4)
+    ann_surv_cost = surv_cost * {1: 4, 2: 2, 3: 1.333, 4: 1}.get(q, 1)
 
-    # לוגיקה לפי מצב משפחתי
     if family_status == "רווק":
-        if survivor_cost == 0:
-            lines.append("💡 מומלץ לפנות לקרן הפנסיה בכדי לקנות **'ברות ביטוח'** מה שיחסוך לך את הצורך עבור חיתום ותקופת אכשרה אם תרצה לרכוש ביטוח שארים בעתיד. העלות זניחה.")
-        elif annual_survivor_cost > 13:
-            savings = annual_survivor_cost * (1.0386 ** (67 - estimated_age))
-            lines.append("1. כרווק סביר מאוד שביטוח השארים מיותר עבורך. ממליץ לשקול לבטלו.")
-            lines.append(f"2. ביטול הביטוח לשנתיים צפוי לשפר את הצבירה שלך בערך ב-**₪{savings:,.0f}**.")
-            lines.append("3. ביטול הביטוח תקף לשנתיים ויש לחדשו אם המצב המשפחתי לא השתנה.")
+        if surv_cost == 0:
+            lines.append("💡 מומלץ לקנות **'ברות ביטוח'** כדי לחסוך חיתום בעתיד. העלות זניחה.")
+        elif ann_surv_cost > 13:
+            savings = ann_surv_cost * (1.0386 ** (67 - est_age))
+            lines.append(f"1. כרווק, ביטוח השארים (₪{ann_surv_cost:,.0f} לשנה) כנראה מיותר. מומלץ לשקול לבטלו.")
+            lines.append(f"2. ביטול לשנתיים ישפר את הצבירה בערך ב-**₪{savings:,.0f}**.")
+            lines.append("3. ביטול תקף לשנתיים ויש לחדשו אם המצב לא השתנה.")
         else:
-            lines.append("✅ מעולה, אתה לא מבזבז כסף על רכישת ביטוח שארים. זכור לחדש את הויתור אחת לשנתיים.")
-
-    elif family_status in ["נשוי", "לא נשוי אך יש ילדים"]:
-        if annual_survivor_cost < 13:
-            lines.append("⚠️ **ייתכן שאתה בתקופת ויתור שארים.** עליך לעדכן בהקדם את הקרן שאינך רווק כדי שירכשו לך ביטוח שארים.")
-
-    # בדיקת כיסוי מקסימלי
-    widow_pension = float(data.get('widow_pension', 0))
-    disability_pension = float(data.get('disability_pension', 0))
+            lines.append("✅ מעולה, אתה לא מבזבז כסף על ביטוח שארים מיותר. זכור לחדש ויתור כל שנתיים.")
     
-    is_low_coverage = (widow_pension < 0.59 * insured_salary) or (disability_pension < 0.74 * insured_salary)
-    
-    if is_low_coverage:
+    elif ann_surv_cost < 13:
+        lines.append("⚠️ **נראה שאתה בוויתור שארים בטעות.** עדכן את הקרן שאינך רווק.")
+
+    # 4. כיסוי מקסימלי
+    widow = float(data.get('widow_pension', 0))
+    dis_pension = float(data.get('disability_pension', 0))
+    if widow < 0.59 * insured_salary or dis_pension < 0.74 * insured_salary:
         lines.append("\n<span style='color:red; font-weight:bold;'>🔴 הכיסוי הביטוחי בקרן הפנסיה איננו מקסימלי</span>")
-        
-        is_woman = gender == "אשה"
-        is_young_man = (gender == "גבר" and years_to_retirement > 27)
-        
-        if is_woman or is_young_man:
-            lines.append("💡 **מומלץ לשקול לשנות את מסלול הביטוח** כך שיקנה לך ולמשפחתך הגנה ביטוחית מקסימלית.")
+        if gender == "אשה" or (67 - est_age > 27):
+            lines.append("💡 מומלץ לשקול שינוי מסלול ביטוח להגנה מקסימלית.")
 
     return "\n".join(lines)
 
-# ─── ממשק משתמש (שלוש השאלות) ──────────────────────────
+# ─── ממשק משתמש ──────────────────────────────────────────
 
-st.title("🔍 בודק דמי ניהול וביטוח פנסיוני")
+st.title("🔍 בודק הפנסיה האוטומטי")
 
-# שלב 1: שאלות
-col1, col2, col3 = st.columns(3)
-with col1:
-    q_gender = st.radio("מגדר:", ["גבר", "אשה"], index=None)
-with col2:
-    q_emp = st.radio("סטטוס הפקדות בדו\"ח:", ["שכיר בלבד", "עצמאי בלבד", "שכיר + עצמאי"], index=None)
-with col3:
-    q_family = st.radio("מצב משפחתי:", ["נשוי", "רווק", "לא נשוי אך יש ילדים"], index=None)
+# שלב השאלות
+gender = st.radio("1. מגדר:", ["גבר", "אשה"], index=None, horizontal=True)
+emp = st.radio("2. סוג הפקדות בדו"ח:", ["שכיר בלבד", "עצמאי בלבד", "שכיר + עצמאי"], index=None, horizontal=True)
+family = st.radio("3. מצב משפחתי:", ["נשוי", "רווק", "לא נשוי אך יש ילדים מתחת לגיל 21"], index=None, horizontal=True)
 
-# בדיקת תנאי תעסוקה
-if q_emp and q_emp != "שכיר בלבד":
+if emp and emp != "שכיר בלבד":
     st.warning("בשלב זה הבוט לא למד לחוות דעה על דוחות של מי שאינם רק שכירים.")
     st.stop()
 
-# הצגת כפתור העלאה רק אם הכל מולא
-if all([q_gender, q_emp, q_family]):
+if all([gender, emp, family]):
     st.markdown("---")
-    file = st.file_uploader("📄 כעת ניתן להעלות את הדו\"ח המקוצר (PDF מקורי בלבד)", type=["pdf"])
-
+    file = st.file_uploader("📄 העלה דוח מקוצר (PDF מקורי)", type=["pdf"])
+    
     if file:
-        pdf_bytes = file.read()
-        
-        # ולידציה 1: וקטורי
-        if not is_vector_pdf(pdf_bytes):
-            st.error("הבוט לא יודע לקרוא קבצים שאינם הקבצים המקוריים מאתר קרן הפנסיה (סריקות או צילומים לא נתמכים).")
-            st.stop()
-        
-        # חילוץ טקסט
-        full_text = extract_pdf_text(pdf_bytes)
-        
-        # ולידציה 2: סוג דוח
-        is_valid_type, error_msg = validate_pension_type(full_text)
-        if not is_valid_type:
-            st.error(error_msg)
+        raw_bytes = file.read()
+        if not is_vector_pdf(raw_bytes):
+            st.error("הבוט לא יודע לקרוא סריקות. העלה קובץ PDF מקורי מהאתר.")
             st.stop()
             
-        # שליחה ל-AI לחילוץ נתונים
-        with st.spinner("🔄 מנתח את נתוני הדוח..."):
+        text = pypdf.PdfReader(io.BytesIO(raw_bytes)).pages[0].extract_text()
+        valid, msg = validate_pension_type(text)
+        if not valid:
+            st.error(msg)
+            st.stop()
+            
+        with st.spinner("🔄 מנתח..."):
             try:
-                system_prompt = """אתה מחלץ נתונים מדוח פנסיה. החזר JSON בלבד עם השדות:
-                accumulation (יתרת כספים בקרן בסוף התקופה מטבלה ב),
-                expected_pension (קצבה חודשית צפויה בפרישה),
-                disability_release (שחרור מתשלום הפקדות - שורה תחתונה טבלה א),
-                total_deposits (סה"כ הפקדות בתקופה),
-                total_salaries (סה"כ משכורות בתקופה),
-                disability_cost (עלות ביטוח נכות/נכות מלאה),
-                survivor_cost (עלות ביטוח שארים/מוות),
-                widow_pension (קצבה לאלמן/ה),
-                disability_pension (קצבה במקרה נכות מלאה),
-                report_quarter (1-4 או 4 אם שנתי)"""
-                
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": anonymize_pii(full_text[:MAX_TEXT_CHARS])}
-                    ],
+                    messages=build_prompt_messages(text),
                     response_format={"type": "json_object"}
                 )
-                
-                extracted_data = json.loads(response.choices[0].message.content)
-                
-                # הרצת הניתוח הלוגי
-                result_markdown = calculate_analysis(extracted_data, q_gender, q_family)
-                
-                st.success("✅ הניתוח הושלם")
-                st.markdown(result_markdown, unsafe_allow_html=True)
-                
-            except Exception as e:
-                st.error(f"אירעה שגיאה בעיבוד הנתונים. נסה שוב מאוחר יותר.")
+                data = json.loads(response.choices[0].message.content)
+                st.markdown(perform_analysis(data, gender, family), unsafe_allow_html=True)
+            except:
+                st.error("אירעה שגיאה בניתוח ה-AI.")
