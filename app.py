@@ -160,13 +160,20 @@ def anonymize_pii(text: str) -> str:
 
 
 def estimate_years_to_retirement(accumulation: float, monthly_pension: float):
+    """
+    NPER חודשי: n_months = log(FV/PV) / log(1 + r_monthly)
+    FV = monthly_pension * 190, PV = accumulation, r = 3.86%/12
+    """
     if not accumulation or not monthly_pension or monthly_pension <= 0 or accumulation <= 0:
         return None
-    ratio = (monthly_pension * PENSION_FACTOR) / accumulation
-    if ratio <= 0:
+    r_monthly = RETURN_RATE / 12
+    fv = monthly_pension * PENSION_FACTOR
+    pv = accumulation
+    if fv <= 0 or pv <= 0:
         return None
     try:
-        return round(math.log(ratio) / math.log(1 + RETURN_RATE), 1)
+        n_months = math.log(fv / pv) / math.log(1 + r_monthly)
+        return round(n_months / 12, 1)
     except Exception:
         return None
 
@@ -227,9 +234,12 @@ def build_prompt_messages(text: str, gender: str, employment: str, family_status
   "report_quarter": <רבעון הדוח 1/2/3/4, מספר שלם או null>
 }}
 
-הערות:
+הערות חשובות:
+- deposit_fee: חלץ מסעיף ג' בלבד — שורה 'דמי ניהול מהפקדה'. אל תשתמש במספר מהעמודה 'לידיעתך ממוצע דמי ניהול בקרן' — זה ממוצע הקרן, לא מה שנגבה מהעמית.
+- accumulation_fee: חלץ מסעיף ג' — שורה 'דמי ניהול מחיסכון'.
 - deposit_status: high אם deposit_fee > 1.0%, אחרת ok
 - accumulation_status: high אם accumulation_fee > 0.145%, אחרת ok
+- total_salaries: חלץ את סכום עמודת 'משכורת' מטבלת הפקדות (סעיף ה'). זו עמודת המשכורת של העובד, לא עמודת 'סה"כ הפקדות'.
 - עלויות ביטוח בדוח מוצגות כמספרים שליליים — החזר אותן כמספרים חיוביים"""
 
     user_prompt = "נתח את הדוח הפנסיוני הבא.\n\n<PENSION_REPORT>\n" + text + "\n</PENSION_REPORT>\n\nהחזר JSON בלבד."
@@ -333,6 +343,8 @@ def format_full_analysis(parsed: dict, gender: str, family_status: str) -> str:
         woman = (gender == "אישה")
         if woman or young_man:
             lines.append("\n💡 **מומלץ לשקול לשנות את מסלול הביטוח** כך שיקנה לך ולמשפחתך הגנה ביטוחית מקסימלית.")
+    elif insured_salary is not None:
+        lines.append("\n✅ **הכיסוי הביטוחי בקרן תקין ומקסימלי.**")
 
     return "\n".join(lines)
 
