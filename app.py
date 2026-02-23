@@ -41,9 +41,6 @@ st.markdown(
 # ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-    api_key = st.text_input("OpenAI API Key", type="password",
-                            help="Your key is never stored or logged.")
-    st.markdown("---")
     st.markdown(
         "**Supported companies:**\n"
         "- מגדל Migdal\n- אלטשולר שחם Altshuler Shaham\n"
@@ -51,6 +48,17 @@ with st.sidebar:
     )
     st.markdown("---")
     st.caption("v1.0 · Hebrew RTL-safe extraction")
+
+# ── Load API key from Streamlit Secrets ──
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+except KeyError:
+    st.error(
+        "⚠️ OpenAI API key not found in Streamlit Secrets.\n\n"
+        "Add it in your app settings under **Secrets** as:\n"
+        "```\nOPENAI_API_KEY = \"sk-...\"\n```"
+    )
+    st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helper: extract all text from PDF
@@ -453,11 +461,7 @@ uploaded_file = st.file_uploader(
     help="Supports reports from Migdal, Altshuler Shaham, Clal, Meitav, More.",
 )
 
-if uploaded_file and not api_key:
-    st.error("🔑 Please enter your OpenAI API key in the sidebar.")
-    st.stop()
-
-if uploaded_file and api_key:
+if uploaded_file:
     pdf_bytes = uploaded_file.read()
 
     # ── Step 1: Extract raw text ──
