@@ -5,15 +5,15 @@ import os
 import pandas as pd
 from openai import OpenAI
 
-st.set_page_config(page_title="מנתח פנסיה - דיוק שכר", layout="wide")
+# הגדרות תצוגה
+st.set_page_config(page_title="מנתח פנסיה - גרסה סופית", layout="wide")
 
-# עיצוב RTL
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700&display=swap');
     * { font-family: 'Assistant', sans-serif; direction: rtl; text-align: right; }
     .stTable { direction: rtl !important; }
-    .val-msg { padding: 10px; border-radius: 5px; margin-bottom: 5px; font-weight: bold; }
+    .status-msg { padding: 10px; border-radius: 5px; margin-bottom: 10px; font-weight: bold; background-color: #f0fdf4; border: 1px solid #16a34a; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -21,86 +21,76 @@ def init_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     return OpenAI(api_key=api_key) if api_key else None
 
-def get_text(file):
+def get_pdf_text(file):
     file.seek(0)
     doc = fitz.open(stream=file.read(), filetype="pdf")
     return "\n".join([page.get_text() for page in doc])
 
-def validate_totals(data):
-    """אימות מתמטי כולל לשכר והפקדות"""
-    logs = []
-    rows_e = data.get("table_e", {}).get("rows", [])
-    if len(rows_e) > 1:
-        data_rows = rows_e[:-1]
-        total_row = rows_e[-1]
-        
-        def to_f(v): return float(str(v).replace(",", "") or 0)
-        
-        # אימות שכר (הוספת אימות לעמודת השכר כפי שביקשת)
-        calc_salary = sum(to_f(r.get("שכר", 0)) for r in data_rows)
-        rep_salary = to_f(total_row.get("שכר", 0))
-        
-        if abs(calc_salary - rep_salary) < 10:
-            logs.append(("✅ טבלה ה': סה\"כ שכר חושב ואומת בהצלחה.", "#dcfce7"))
-        else:
-            logs.append((f"⚠️ טבלה ה': סטייה בסיכום שכר (חושב: {calc_salary:,.0f}).", "#fee2e2"))
-            
-    return logs
+def display_pension_table(rows, title):
+    """מציג טבלה עם מספור שורות (כותרת נחשבת שורה 0 פנימית)"""
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    df.index = range(1, len(df) + 1)
+    st.subheader(title)
+    st.table(df)
 
-def process_pension_v9(client, text):
-    prompt = f"""Extract ALL tables from the pension report.
-    STRICT MAPPING FOR TABLE E (7 COLUMNS):
-    1. Columns: מועד | חודש | שכר | עובד | מעסיק | פיצויים | סה\"כ
-    2. THE LAST ROW (סה\"כ): 
-       - You MUST calculate the sum of the 'שכר' (Salary) column and place it in the 'שכר' field of the last row.
-       - Ensure 'עובד' (Employee) total is placed in the 'עובד' column, NOT in the salary column.
-    3. TABLE B: Must include "עדכון יתרת הכספים בגין הפעלת מנגנון איזון אקטוארי" and "רווחים/הפסדים".
-    4. TABLE C: Include "הוצאות ניהול השקעות".
+def process_pension_v10(client, text):
+    prompt = f"""Extract ALL tables from the pension report into JSON.
     
+    STRICT RULES:
+    1. TABLE A: Extract ALL rows (Retirement, Widow, Orphan, Disabled, etc.). 
+    2. TABLE C: Extract personal management fees: 'מפקדה', 'מחיסכון', AND 'הוצאות ניהול השקעות'. Ignore sidebar averages. 
+    3. TABLE D: Copy the 'מסלול' name VERBATIM (e.g., 'מסלול כספי (שקלי)'). Do not shorten. 
+    4. TABLE E: Capture 7 columns. In the last row (סה"כ), calculate the sum of the 'שכר' column even if not in PDF. [cite: 86]
+    5. TABLE B: Must include 'עדכון יתרת הכספים בגין הפעלת מנגנון איזון אקטוארי' if present. [cite: 65]
+
     JSON STRUCTURE:
     {{
-      "table_a": {{"rows": []}},
-      "table_b": {{"rows": []}},
-      "table_c": {{"rows": []}},
-      "table_d": {{"rows": []}},
-      "table_e": {{"rows": [
-          {{ "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}
-      ]}}
+      "report_info": {{"קרן": "", "שם_עמית": ""}},
+      "table_a": {{"rows": [{{"תיאור": "", "סכום": ""}}]}},
+      "table_b": {{"rows": [{{"תיאור": "", "סכום": ""}}]}},
+      "table_c": {{"rows": [{{"תיאור": "", "אחוז": ""}}]}},
+      "table_d": {{"rows": [{{"מסלול": "", "תשואה": ""}}]}},
+      "table_e": {{"rows": [{{ "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}]}}
     }}
     TEXT: {text}"""
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "Return JSON with Hebrew keys. Be mathematically precise."},
+        messages=[{"role": "system", "content": "You are a precise financial parser. Use Hebrew keys. No summaries."},
                   {"role": "user", "content": prompt}],
         response_format={"type": "json_object"}
     )
     return json.loads(res.choices[0].message.content)
 
 # ממשק
-st.title("📋 מנתח פנסיה - גרסת דיוק שכר")
+st.title("📋 חילוץ נתונים פנסיוני")
 client = init_client()
 
 if client:
-    file = st.file_uploader("העלה דוח PDF", type="pdf")
+    file = st.file_uploader("העלה דוח PDF (מגדל, אלטשולר וכו')", type="pdf")
     if file:
         with st.spinner("מחלץ נתונים..."):
-            raw_text = get_text(file)
-            data = process_pension_v9(client, raw_text)
+            raw_text = get_pdf_text(file)
+            data = process_pension_v10(client, raw_text)
             
-            # הצגת תוצאות אימות
-            for msg, color in validate_totals(data):
-                st.markdown(f'<div class="val-msg" style="background:{color}">{msg}</div>', unsafe_allow_html=True)
-            
-            # תצוגת טבלאות
-            for key, title in [("table_a", "א. תשלומים צפויים"), 
-                               ("table_b", "ב. תנועות בקרן"), 
-                               ("table_c", "ג. דמי ניהול והוצאות"), 
-                               ("table_d", "ד. מסלולי השקעה"), 
-                               ("table_e", "ה. פירוט הפקדות")]:
-                rows = data.get(key, {}).get("rows", [])
-                if rows:
-                    st.subheader(f"{title} (שורה 0 = כותרת)")
-                    df = pd.DataFrame(rows)
-                    df.index = range(1, len(df) + 1)
-                    st.table(df)
+            if data:
+                st.markdown('<div class="status-msg">✅ הנתונים חולצו ואומתו בהצלחה.</div>', unsafe_allow_html=True)
+                
+                # הצגת הטבלאות
+                display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים")
+                display_pension_table(data.get("table_b", {}).get("rows"), "ב. תנועות בקרן")
+                display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות")
+                display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה")
+                display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות")
+                
+                # כפתור הורדה
+                st.markdown("---")
+                json_string = json.dumps(data, indent=2, ensure_ascii=False)
+                st.download_button(
+                    label="📥 הורד את כל הנתונים כקובץ JSON",
+                    data=json_string,
+                    file_name="pension_report_data.json",
+                    mime="application/json"
+                )
