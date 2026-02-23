@@ -3,17 +3,19 @@ import fitz
 import json
 import os
 import pandas as pd
+import re
 from openai import OpenAI
 
-# הגדרות תצוגה
-st.set_page_config(page_title="מנתח פנסיה - גרסת אפס פשרות", layout="wide")
+# הגדרות תצוגה RTL
+st.set_page_config(page_title="מנתח פנסיה - גרסת האימות הסופי", layout="wide")
 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700&display=swap');
     * { font-family: 'Assistant', sans-serif; direction: rtl; text-align: right; }
     .stTable { direction: rtl !important; }
-    .status-msg { padding: 12px; border-radius: 8px; margin-bottom: 10px; font-weight: bold; background-color: #f0fdf4; border: 1px solid #16a34a; }
+    .val-success { padding: 12px; border-radius: 8px; margin-bottom: 10px; font-weight: bold; background-color: #f0fdf4; border: 1px solid #16a34a; color: #16a34a; }
+    .val-error { padding: 12px; border-radius: 8px; margin-bottom: 10px; font-weight: bold; background-color: #fef2f2; border: 1px solid #dc2626; color: #dc2626; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -29,6 +31,34 @@ def get_full_pdf_text(file):
         full_text += f"--- PAGE {i+1} ---\n" + page.get_text() + "\n"
     return full_text
 
+def clean_num(val):
+    """ניקוי מספרים לחישובים מתמטיים"""
+    if not val: return 0.0
+    return float(re.sub(r'[^\d\.\-]', '', str(val).replace(",", "")))
+
+def perform_cross_validation(data):
+    """אימות הצלבה: סה\"כ הפקדות בטבלה ב' מול סה\"כ בטבלה ה'"""
+    # 1. חילוץ סכום ההפקדות מטבלה ב'
+    rows_b = data.get("table_b", {}).get("rows", [])
+    deposit_in_b = 0.0
+    for r in rows_b:
+        if "הופקדו" in r.get("תיאור", ""):
+            deposit_in_b = clean_num(r.get("סכום", 0))
+            break
+            
+    # 2. חילוץ שורת הסה\"כ מטבלה ה'
+    rows_e = data.get("table_e", {}).get("rows", [])
+    deposit_in_e = 0.0
+    if rows_e:
+        last_row = rows_e[-1]
+        deposit_in_e = clean_num(last_row.get("סה\"כ", 0))
+    
+    # הצגת התוצאה
+    if abs(deposit_in_b - deposit_in_e) < 5:
+        st.markdown(f'<div class="val-success">✅ אימות הצלבה עבר: סכום ההפקדות בטבלה ב\' ({deposit_in_b:,.0f} ₪) תואם לסיכום בטבלה ה\'.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="val-error">⚠️ שגיאת הצלבה: סכום ההפקדות בטבלה ב\' ({deposit_in_b:,.0f} ₪) אינו תואם לטבלה ה\' ({deposit_in_e:,.0f} ₪).</div>', unsafe_allow_html=True)
+
 def display_pension_table(rows, title):
     if not rows: return
     df = pd.DataFrame(rows)
@@ -36,36 +66,36 @@ def display_pension_table(rows, title):
     st.subheader(title)
     st.table(df)
 
-def process_no_compromise(client, text):
-    prompt = f"""You are a top-tier forensic auditor. Extract EVERY table and EVERY row from this pension report. 
+def process_with_cross_audit(client, text):
+    prompt = f"""Extract ALL tables from the pension report into JSON.
     
-    MANDATORY - DO NOT SKIP:
-    1. TABLE A (Estimates): Extract all rows (e.g., 5,223, 10,888, etc.).
-    2. TABLE B (Movements): Extract all rows (Opening, Deposits, Profits, Fees, Insurance, etc.).
-    3. TABLE C (Fees): Extract ALL personal fees including investment expenses (הוצאות ניהול השקעות).
-    4. TABLE D (Tracks): Extract the FULL track name and its return.
+    TERMINATION RULE FOR TABLE E:
+    - Extract rows sequentially.
+    - STOP extraction for Table E immediately after the row that starts with 'סה"כ' (Total).
+    - Ignore all rows and sections appearing after the 'סה"כ' row.
     
-    STRICT RULES FOR TABLE E (DEPOSITS):
-    - DO NOT AGGREGATE. Every single row from the PDF must be a separate entry in the JSON. Even small amounts (39, 34, 478, etc.) must appear exactly as shown.
-    - FILTERING: If a section is titled 'פירוט הפקדות בגין שנת XXXX שהופקדו לאחר תום השנה' or similar, DO NOT include rows from that section. Extract ONLY deposits belonging to the reporting period.
-    - TOTAL ROW: The last row must be 'סה"כ'. Calculate the sum of the 'שכר' column for this row based ONLY on the non-filtered rows.
-    - Columns: מועד | חודש | שכר | עובד | מעסיק | פיצויים | סה"כ.
+    CORE REQUIREMENTS:
+    - TABLE A: Extract ALL Estimates.
+    - TABLE B: Extract ALL rows including Opening Balance, Deposits, and Closing Balance.
+    - TABLE C: Include Management Fees and Investment Expenses (הוצאות ניהול השקעות).
+    - TABLE D: VERBATIM track name (e.g., 'מסלול כספי שקלי').
+    - TABLE E: 7 columns. Calculate 'שכר' total for the 'סה"כ' row.
 
     JSON STRUCTURE:
     {{
-      "report_info": {{"קרן": "", "עמית": ""}},
-      "table_a": {{"rows": [{{"תיאור": "", "סכום": ""}}]}},
-      "table_b": {{"rows": [{{"תיאור": "", "סכום": ""}}]}},
-      "table_c": {{"rows": [{{"תיאור": "", "אחוז": ""}}]}},
-      "table_d": {{"rows": [{{"מסלול": "", "תשואה": ""}}]}},
+      "table_a": {{"rows": []}},
+      "table_b": {{"rows": []}},
+      "table_c": {{"rows": []}},
+      "table_d": {{"rows": []}},
       "table_e": {{"rows": [{{ "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}]}}
     }}
-    REPORT TEXT:
+    
+    TEXT:
     {text}"""
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "You are a meticulous data extraction engine. You extract every row exactly as printed. No summaries."},
+        messages=[{"role": "system", "content": "You are a forensic financial auditor. Accuracy is 100% required."},
                   {"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
@@ -73,31 +103,26 @@ def process_no_compromise(client, text):
     return json.loads(res.choices[0].message.content)
 
 # ממשק
-st.title("📋 חילוץ נתונים פנסיוני (גרסת אפס פשרות)")
+st.title("📋 מנתח פנסיה - גרסת האימות המצליב")
 client = init_client()
 
 if client:
     file = st.file_uploader("העלה דוח PDF", type="pdf")
     if file:
-        with st.spinner("מבצע חילוץ מלא של כל השורות..."):
-            full_text = get_full_pdf_text(file)
-            data = process_no_compromise(client, full_text)
+        with st.spinner("מחלץ ומאמת נתונים..."):
+            raw_text = get_full_pdf_text(file)
+            data = process_cross_audit(client, raw_text)
             
             if data:
-                st.markdown('<div class="status-msg">✅ הנתונים חולצו במלואם.</div>', unsafe_allow_html=True)
+                # הרצת אימות הצלבה
+                perform_cross_validation(data)
                 
-                # תצוגת טבלאות
+                # הצגת הטבלאות
                 display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים")
                 display_pension_table(data.get("table_b", {}).get("rows"), "ב. תנועות בקרן")
                 display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות")
                 display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה")
                 display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות")
                 
-                # כפתור הורדה
                 st.markdown("---")
-                st.download_button(
-                    label="📥 הורד נתונים כקובץ JSON",
-                    data=json.dumps(data, indent=2, ensure_ascii=False),
-                    file_name="pension_audit_data.json",
-                    mime="application/json"
-                )
+                st.download_button("📥 הורד JSON", json.dumps(data, indent=2, ensure_ascii=False), "pension_audit.json")
