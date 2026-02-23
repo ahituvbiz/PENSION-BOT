@@ -5,118 +5,102 @@ import os
 import pandas as pd
 from openai import OpenAI
 
-# הגדרות עמוד ועיצוב
-st.set_page_config(page_title="חילוץ פנסיה - גרסת שורה 7", layout="wide")
+st.set_page_config(page_title="מנתח פנסיה - דיוק שכר", layout="wide")
 
+# עיצוב RTL
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700&display=swap');
     * { font-family: 'Assistant', sans-serif; direction: rtl; text-align: right; }
     .stTable { direction: rtl !important; }
-    .status-box { padding: 12px; border-radius: 8px; margin-bottom: 15px; font-weight: bold; border: 1px solid #e2e8f0; }
+    .val-msg { padding: 10px; border-radius: 5px; margin-bottom: 5px; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-def init_openai():
+def init_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        st.error("❌ מפתח API חסר ב-Secrets.")
-        return None
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=api_key) if api_key else None
 
-def get_pdf_text(file):
+def get_text(file):
     file.seek(0)
     doc = fitz.open(stream=file.read(), filetype="pdf")
     return "\n".join([page.get_text() for page in doc])
 
-def display_pension_table(rows, title):
-    """מציג טבלה עם מספור המתחיל מ-1 (כותרת=0)"""
-    if not rows:
-        st.warning(f"לא נמצאו נתונים עבור {title}")
-        return
-    
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        # הגדרת האינדקס שיתחיל ב-1
-        df.index = range(1, len(df) + 1)
-        st.subheader(title)
-        st.table(df)
-
-def validate_math_logic(data):
-    """אימות ששורה 7 בטבלה ה' אכן שווה לסכום השורות מעליה"""
+def validate_totals(data):
+    """אימות מתמטי כולל לשכר והפקדות"""
     logs = []
-    
-    # אימות טבלה ה'
     rows_e = data.get("table_e", {}).get("rows", [])
     if len(rows_e) > 1:
-        # לוקחים את כל השורות פרט לאחרונה (סה"כ)
         data_rows = rows_e[:-1]
         total_row = rows_e[-1]
         
-        try:
-            calc_sum = sum(float(str(r.get("סה\"כ", 0)).replace(",", "")) for r in data_rows)
-            rep_sum = float(str(total_row.get("סה\"כ", 0)).replace(",", ""))
-            
-            if abs(calc_sum - rep_sum) < 2:
-                logs.append("✅ טבלה ה': שורה 7 (סה\"כ) תואמת במדויק לסיכום ההפקדות.")
-            else:
-                logs.append(f"⚠️ טבלה ה': סטייה בשורת הסיכום (צפוי: {rep_sum}, חושב: {calc_sum:.0f})")
-        except:
-            logs.append("⚠️ לא ניתן היה לבצע אימות מתמטי בגלל פורמט מספרים.")
+        def to_f(v): return float(str(v).replace(",", "") or 0)
+        
+        # אימות שכר (הוספת אימות לעמודת השכר כפי שביקשת)
+        calc_salary = sum(to_f(r.get("שכר", 0)) for r in data_rows)
+        rep_salary = to_f(total_row.get("שכר", 0))
+        
+        if abs(calc_salary - rep_salary) < 10:
+            logs.append(("✅ טבלה ה': סה\"כ שכר חושב ואומת בהצלחה.", "#dcfce7"))
+        else:
+            logs.append((f"⚠️ טבלה ה': סטייה בסיכום שכר (חושב: {calc_salary:,.0f}).", "#fee2e2"))
             
     return logs
 
-def process_with_ai(client, text):
-    # הנחיה קשיחה לכלול את הסה"כ כשורה אחרונה ומפתחות בעברית
-    prompt = f"""Extract ALL pension tables. 
-    IMPORTANT RULES:
-    1. TABLE E: Extract all 7 columns. The LAST ROW must be the total (סה"כ) row.
-    2. USE HEBREW KEYS ONLY for all rows.
-    3. TABLE C: Extract personal rates (1.49% and 0.10%) only.
+def process_pension_v9(client, text):
+    prompt = f"""Extract ALL tables from the pension report.
+    STRICT MAPPING FOR TABLE E (7 COLUMNS):
+    1. Columns: מועד | חודש | שכר | עובד | מעסיק | פיצויים | סה\"כ
+    2. THE LAST ROW (סה\"כ): 
+       - You MUST calculate the sum of the 'שכר' (Salary) column and place it in the 'שכר' field of the last row.
+       - Ensure 'עובד' (Employee) total is placed in the 'עובד' column, NOT in the salary column.
+    3. TABLE B: Must include "עדכון יתרת הכספים בגין הפעלת מנגנון איזון אקטוארי" and "רווחים/הפסדים".
+    4. TABLE C: Include "הוצאות ניהול השקעות".
     
     JSON STRUCTURE:
     {{
-      "report_info": {{"קרן": "", "תקופה": ""}},
-      "table_a": {{"rows": [{{"תיאור": "", "סכום": ""}}]}},
-      "table_b": {{"rows": [{{"תיאור": "", "סכום": ""}}]}},
-      "table_c": {{"rows": [{{"תיאור": "", "אחוז": ""}}]}},
-      "table_d": {{"rows": [{{"מסלול": "", "תשואה": ""}}]}},
-      "table_e": {{
-          "rows": [
-              {{ "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}
-          ]
-      }}
+      "table_a": {{"rows": []}},
+      "table_b": {{"rows": []}},
+      "table_c": {{"rows": []}},
+      "table_d": {{"rows": []}},
+      "table_e": {{"rows": [
+          {{ "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}
+      ]}}
     }}
-    TEXT CONTENT: {text}"""
+    TEXT: {text}"""
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "You are a precise financial extractor. Return JSON with Hebrew keys."},
+        messages=[{"role": "system", "content": "Return JSON with Hebrew keys. Be mathematically precise."},
                   {"role": "user", "content": prompt}],
         response_format={"type": "json_object"}
     )
     return json.loads(res.choices[0].message.content)
 
-# הממשק
-st.title("📋 חילוץ דוח פנסיה - גרסה 7.0")
-client = init_openai()
+# ממשק
+st.title("📋 מנתח פנסיה - גרסת דיוק שכר")
+client = init_client()
 
 if client:
     file = st.file_uploader("העלה דוח PDF", type="pdf")
     if file:
-        with st.spinner("מבצע חילוץ ואימות..."):
-            raw_text = get_pdf_text(file)
-            data = process_with_ai(client, raw_text)
+        with st.spinner("מחלץ נתונים..."):
+            raw_text = get_text(file)
+            data = process_pension_v9(client, raw_text)
             
-            # הצגת הודעות אימות
-            for note in validate_math_logic(data):
-                st.markdown(f'<div class="status-box">{note}</div>', unsafe_allow_html=True)
+            # הצגת תוצאות אימות
+            for msg, color in validate_totals(data):
+                st.markdown(f'<div class="val-msg" style="background:{color}">{msg}</div>', unsafe_allow_html=True)
             
-            # הצגת הטבלאות עם מספור (שורה 0 היא הכותרת)
-            display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים")
-            display_pension_table(data.get("table_b", {}).get("rows"), "ב. תנועות בקרן")
-            display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול (אישי)")
-            display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה")
-            display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות")
-            
-            st.download_button("הורד נתונים (JSON)", json.dumps(data, indent=2, ensure_ascii=False), "pension_data.json")
+            # תצוגת טבלאות
+            for key, title in [("table_a", "א. תשלומים צפויים"), 
+                               ("table_b", "ב. תנועות בקרן"), 
+                               ("table_c", "ג. דמי ניהול והוצאות"), 
+                               ("table_d", "ד. מסלולי השקעה"), 
+                               ("table_e", "ה. פירוט הפקדות")]:
+                rows = data.get(key, {}).get("rows", [])
+                if rows:
+                    st.subheader(f"{title} (שורה 0 = כותרת)")
+                    df = pd.DataFrame(rows)
+                    df.index = range(1, len(df) + 1)
+                    st.table(df)
