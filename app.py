@@ -452,6 +452,72 @@ def build_table_c(rows: list[dict]) -> pd.DataFrame:
     df["percentage"] = df["percentage"].apply(clean_num)
     return df
 
+def extract_table_d_with_regex(section_text: str) -> list[dict]:
+    """
+    חילוץ טבלה ד' ישירות עם Regex מהקטע המבודד של "מסלולי השקעה".
+    לא מסתמך על GPT-4o לקרוא את המספר — מחפש שם מסלול ואחריו אחוז.
+
+    דפוסים נפוצים בדוחות:
+        מסלול כלל פנסיה לבני 50 ומטה   0.17%
+        מסלול אג"ח ממשלתי               -1.23%
+        מסלול מניות                      12.50%
+    """
+    rows = []
+    lines = section_text.splitlines()
+
+    # Regex: מחפש שורה עם שם מסלול (מכיל "מסלול") ואחוז — גם אם הם על שורה אחת
+    # וגם מטפל במקרה שהאחוז על שורה נפרדת אחרי שם המסלול
+    pct_pattern = re.compile(r"(-?\d+\.\d+)\s*%")
+    track_pattern = re.compile(r"מסלול[יי]?")
+    # שורת כותרת — לא שם מסלול (מכילה "השקעה" או "תשואות")
+    header_pattern = re.compile(r"השקעה|תשואות")
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        if track_pattern.search(line) and not header_pattern.search(line):
+            # נסה למצוא אחוז באותה שורה
+            pct_match = pct_pattern.search(line)
+
+            if pct_match:
+                # שם המסלול הוא הטקסט ללא האחוז
+                track_name = pct_pattern.sub("", line).replace("%", "").strip()
+                rows.append({
+                    "track_name": track_name,
+                    "return_percentage": pct_match.group(1),
+                })
+            else:
+                # האחוז אולי בשורה הבאה — בדוק עד 3 שורות קדימה
+                track_name_parts = [line]
+                found = False
+                for j in range(1, 4):
+                    if i + j >= len(lines):
+                        break
+                    next_line = lines[i + j].strip()
+                    pct_match = pct_pattern.search(next_line)
+                    if pct_match:
+                        full_name = " ".join(track_name_parts).strip()
+                        rows.append({
+                            "track_name": full_name,
+                            "return_percentage": pct_match.group(1),
+                        })
+                        i += j  # דלג על השורות שכבר עיבדנו
+                        found = True
+                        break
+                    else:
+                        track_name_parts.append(next_line)
+                # אם לא נמצא אחוז — הוסף ללא אחוז
+                if not found:
+                    rows.append({
+                        "track_name": " ".join(track_name_parts).strip(),
+                        "return_percentage": None,
+                    })
+        i += 1
+
+    return rows
+
+
 def build_table_d(rows: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=["track_name", "return_percentage"])
     df["return_percentage"] = df["return_percentage"].apply(clean_num)
@@ -599,9 +665,9 @@ if uploaded_file:
         except Exception:
             st.stop()
 
-    section_d_preview = extract_section(raw_text, "מסלולי השקעה")
-    with st.expander("📌 Isolated Section ד text (מסלולי השקעה) — sent to GPT-4o for table_d", expanded=False):
-        st.text(section_d_preview if section_d_preview != raw_text else "⚠️ Section header 'מסלולי השקעה' not found — full text was used as fallback")
+    with st.expander("📌 קטע 'מסלולי השקעה' שחולץ עם Regex (debug)", expanded=False):
+        _d_preview = extract_section(raw_text, "מסלולי השקעה")
+        st.text(_d_preview if _d_preview != raw_text else "⚠️ הכותרת 'מסלולי השקעה' לא נמצאה — נעשה שימוש בטקסט המלא")
 
     with st.expander("🛠️ Raw JSON from GPT-4o (debug)", expanded=False):
         st.json(extracted)
@@ -611,7 +677,6 @@ if uploaded_file:
         "table_a": build_table_a,
         "table_b": build_table_b,
         "table_c": build_table_c,
-        "table_d": build_table_d,
         "table_e": build_table_e,
     }
 
@@ -623,6 +688,19 @@ if uploaded_file:
         except Exception as exc:
             st.warning(f"Could not build {key}: {exc}")
             dfs[key] = pd.DataFrame()
+
+    # ── Table D: חילוץ ישיר עם Regex — לא GPT ──
+    section_d_text = extract_section(raw_text, "מסלולי השקעה")
+    regex_rows_d = extract_table_d_with_regex(section_d_text)
+
+    if regex_rows_d:
+        dfs["table_d"] = build_table_d(regex_rows_d)
+        st.success(f"✅ טבלה ד' חולצה עם Regex ישירות מסעיף 'מסלולי השקעה' ({len(regex_rows_d)} שורות)")
+    else:
+        # fallback: השתמש בתוצאת GPT אם Regex לא מצא כלום
+        gpt_rows_d = extracted.get("table_d", [])
+        dfs["table_d"] = build_table_d(gpt_rows_d) if gpt_rows_d else pd.DataFrame()
+        st.warning("⚠️ Regex לא מצא מסלולים בסעיף ד' — נעשה שימוש בתוצאת GPT-4o כ-fallback")
 
     # ── Step 4: Cross-validation ──
     st.markdown("---")
