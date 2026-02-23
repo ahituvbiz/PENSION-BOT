@@ -1,25 +1,57 @@
 import streamlit as st
 import fitz
-import json
-import os
+import base64
 import pandas as pd
 import re
+import os
 from openai import OpenAI
+from pydantic import BaseModel, Field
 
-# הגדרות RTL ועיצוב קשיח - חסימת כל אפשרות לעיגול או פרשנות
-st.set_page_config(page_title="מנתח פנסיה - גירסה 28.0 (דיוק מוחלט)", layout="wide")
-
+# --- הגדרות עיצוב ---
+st.set_page_config(page_title="מנתח פנסיה - מבוסס Vision (דיוק מוחלט)", layout="wide")
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700&display=swap');
-    * { font-family: 'Assistant', sans-serif; direction: rtl; text-align: right; }
-    .stTable { direction: rtl !important; width: 100%; }
-    th, td { text-align: right !important; padding: 12px !important; white-space: nowrap; }
-    .val-success { padding: 12px; border-radius: 8px; margin-bottom: 10px; font-weight: bold; background-color: #f0fdf4; border: 1px solid #16a34a; color: #16a34a; }
-    .val-error { padding: 12px; border-radius: 8px; margin-bottom: 10px; font-weight: bold; background-color: #fef2f2; border: 1px solid #dc2626; color: #dc2626; }
+    .block-container { direction: rtl; }
+    table { text-align: right; width: 100%; }
+    th, td { text-align: right !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# --- סכמות מבנה נתונים קשיח (Structured Outputs) ---
+class TableARow(BaseModel):
+    description: str = Field(description="תיאור הקצבה או התשלום")
+    amount: str = Field(description="סכום בשקלים")
+
+class TableBRow(BaseModel):
+    description: str = Field(description="תיאור התנועה")
+    amount: str = Field(description="סכום בשקלים")
+
+class TableCRow(BaseModel):
+    description: str = Field(description="תיאור דמי ניהול או הוצאה")
+    percentage: str = Field(description="האחוז (כולל סימן % אם קיים)")
+
+class TableDRow(BaseModel):
+    track: str = Field(description="שם המסלול")
+    return_rate: str = Field(description="תשואה (כולל סימן %)")
+
+class TableERow(BaseModel):
+    employer: str = Field(description="שם המעסיק")
+    deposit_date: str = Field(description="מועד הפקדה")
+    salary_month: str = Field(description="עבור חודש משכורת")
+    salary: str = Field(description="משכורת / שכר מבוטח")
+    employee: str = Field(description="תגמולי עובד")
+    employer_dep: str = Field(description="תגמולי מעסיק")
+    severance: str = Field(description="פיצויים")
+    total: str = Field(description="סה\"כ הפקדות (הסכום של כל הרכיבים)")
+
+class PensionData(BaseModel):
+    table_a: list[TableARow] = Field(description="טבלה א - תשלומים צפויים")
+    table_b: list[TableBRow] = Field(description="טבלה ב - תנועות בקרן הפנסיה בשנת הדוח")
+    table_c: list[TableCRow] = Field(description="טבלה ג - אחוז דמי ניהול והוצאות")
+    table_d: list[TableDRow] = Field(description="טבלה ד - מסלולי השקעה ותשואות")
+    table_e: list[TableERow] = Field(description="טבלה ה - פירוט הפקדות לקרן. חובה לעבור על כל העמודים ולחלץ את *כל* השורות. שורת הסה\"כ תהיה השורה האחרונה בהכרח.")
+
+# --- פונקציות עזר ---
 def init_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     return OpenAI(api_key=api_key) if api_key else None
@@ -35,19 +67,18 @@ def perform_cross_validation(data):
     """אימות הצלבה קשיח בין טבלה ב' ל-ה'"""
     dep_b = 0.0
     for r in data.get("table_b", {}).get("rows", []):
-        row_str = " ".join(str(v) for v in r.values())
-        if any(kw in row_str for kw in ["הופקדו", "כספים שהופקדו"]):
-            nums = [clean_num(v) for v in r.values() if clean_num(v) > 10]
-            if nums: dep_b = nums[0]
+        desc = str(r.get("תיאור", ""))
+        if any(kw in desc for kw in ["הופקדו", "כספים שהופקדו"]):
+            dep_b = clean_num(r.get("סכום בש\"ח", 0))
             break
             
     rows_e = data.get("table_e", {}).get("rows", [])
     dep_e = clean_num(rows_e[-1].get("סה\"כ", 0)) if rows_e else 0.0
-    
+
     if abs(dep_b - dep_e) < 5 and dep_e > 0:
-        st.markdown(f'<div class="val-success">✅ אימות הצלבה עבר: סכום ההפקדות ({dep_e:,.2f} ₪) תואם במדויק.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="color: green; font-weight: bold; padding: 10px; background-color: #e6ffe6; border-radius: 5px;">✅ אימות הצלבה עבר: סכום ההפקדות ({dep_e:,.2f} ₪) תואם במדויק.</div><br>', unsafe_allow_html=True)
     elif dep_e > 0:
-        st.markdown(f'<div class="val-error">⚠️ שגיאת אימות: טבלה ב\' ({dep_b:,.2f} ₪) לעומת טבלה ה\' ({dep_e:,.2f} ₪).</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="color: red; font-weight: bold; padding: 10px; background-color: #ffe6e6; border-radius: 5px;">⚠️ שגיאת אימות חזותית: טבלה ב\' ({dep_b:,.2f} ₪) לעומת סה"כ טבלה ה\' ({dep_e:,.2f} ₪).</div><br>', unsafe_allow_html=True)
 
 def display_pension_table(rows, title, col_order):
     if not rows: return
@@ -58,88 +89,83 @@ def display_pension_table(rows, title, col_order):
     st.subheader(title)
     st.table(df)
 
-def process_audit_v28(client, text):
-    prompt = f"""You are a RAW TEXT TRANSCRIBER. Your ONLY job is to copy characters from the text to JSON.
-    
-    CRITICAL INSTRUCTIONS:
-    1. ZERO INTERPRETATION: Do not flip digits (e.g., 67 remains 67). 
-    2. ZERO ROUNDING: If a return is 0.17%, copy 0.17%. Do NOT round to 1.0%.
-    3. TABLE E SUMMARY: 
-       - The 'סה"כ' row must be mapped STRICTLY. 
-       - The total of the total (the largest sum) MUST be in the 'סה"כ' column.
-       - 'מועד' and 'חודש' must be empty strings.
-    
-    JSON STRUCTURE:
-    {{
-      "table_a": {{"rows": [{{"תיאור": "", "סכום בש\"ח": ""}}]}},
-      "table_b": {{"rows": [{{"תיאור": "", "סכום בש\"ח": ""}}]}},
-      "table_c": {{"rows": [{{"תיאור": "", "אחוז": ""}}]}},
-      "table_d": {{"rows": [{{"מסלול": "", "תשואה": ""}}]}},
-      "table_e": {{"rows": [{{ "שם המעסיק": "", "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}]}}
-    }}
-    TEXT: {text}"""
-    
-    res = client.chat.completions.create(
+# --- פונקציית העיבוד המרכזית (Vision + Structured Outputs) ---
+def process_pdf_vision(client, pdf_bytes):
+    # 1. המרת דפי ה-PDF לתמונות
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    base64_images = []
+    for page in doc:
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = pix.tobytes("jpeg")
+        base64_images.append(base64.b64encode(img_bytes).decode("utf-8"))
+        
+    # 2. בניית הפרומפט והעברת התמונות
+    messages = [
+        {
+            "role": "system",
+            "content": "אתה מנוע חילוץ נתונים מדויק מדוחות פנסיה ישראליים מקוצרים. המשימה שלך היא לחלץ נתונים מטבלאות א' עד ה'. העתק את המספרים במדויק מתוך התמונה. אל תעגל מספרים, אל תמציא נתונים, ואל תשנה את כיוון הספרות. בטבלה ה' (הפקדות), חובה לחלץ את *כל השורות* המופיעות ברצף, ייתכן שהן גולשות על פני מספר עמודים. הקפד לשמור על יישור העמודות המדויק, במיוחד בין 'עובד', 'מעסיק' ו'פיצויים'."
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "מצורפים עמודי דוח פנסיה מקוצר. אנא חלץ את הנתונים לתוך המבנה המוגדר."}
+            ] + [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}} for img in base64_images
+            ]
+        }
+    ]
+
+    # 3. קריאה למודל בשימוש parse ליצירת אובייקט Pydantic ודאי
+    response = client.beta.chat.completions.parse(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "You are a mechanical OCR tool. You copy characters exactly. You do not use logic, you do not round, and you do not flip numbers."},
-                  {"role": "user", "content": prompt}],
-        temperature=0, # ביטול כל "יצירתיות" או ניחושים
-        response_format={"type": "json_object"}
+        messages=messages,
+        response_format=PensionData,
+        temperature=0 # חסימת "יצירתיות" של המודל
     )
-    data = json.loads(res.choices[0].message.content)
     
-    # תיקון הסטות וחישוב שכר ב-Python (ללא AI)
-    rows_e = data.get("table_e", {}).get("rows", [])
-    if len(rows_e) > 1:
-        last_row = rows_e[-1]
-        
-        # 1. חישוב שכר נקי
-        salary_sum = sum(clean_num(r.get("שכר", 0)) for r in rows_e[:-1])
-        
-        # 2. תיקון הסטה (Shift Fix): אם הסה"כ הכללי זז ימינה לעמודת הפיצויים
-        vals = [last_row.get("עובד"), last_row.get("מעסיק"), last_row.get("פיצויים"), last_row.get("סה\"כ")]
-        cleaned_vals = [clean_num(v) for v in vals]
-        max_val = max(cleaned_vals)
-        
-        # אם המספר הכי גדול (הסה"כ) לא נמצא בעמודת הסה"כ - נזיז הכל למקום
-        if max_val > 0 and clean_num(last_row.get("סה\"כ")) != max_val:
-            # מציאת האינדקס של הערך המקסימלי והזזתו לעמודת הסה"כ
-            non_zero_vals = [v for v in vals if clean_num(v) > 0]
-            if len(non_zero_vals) == 4: # הכל חולץ אבל מוסט
-                last_row["סה\"כ"] = non_zero_vals[3]
-                last_row["פיצויים"] = non_zero_vals[2]
-                last_row["מעסיק"] = non_zero_vals[1]
-                last_row["עובד"] = non_zero_vals[0]
-            elif len(non_zero_vals) == 3: # הפיצויים או אחד אחר חסר
-                 last_row["סה\"כ"] = non_zero_vals[2]
-                 last_row["מעסיק"] = non_zero_vals[1]
-                 last_row["עובד"] = non_zero_vals[0]
-                 last_row["פיצויים"] = "0"
-            
-        # 3. קיבוע שכר וניקוי תאריכים
-        last_row["שכר"] = f"{salary_sum:,.0f}"
-        last_row["מועד"] = ""
-        last_row["חודש"] = ""
-        last_row["שם המעסיק"] = "סה\"כ"
+    parsed_data = response.choices.message.parsed
+    
+    # 4. המרה חזרה למבנה ה-JSON (לצורך תאימות מלאה לקוד התצוגה שלך)
+    data = {
+        "table_a": {"rows": [{"תיאור": r.description, "סכום בש\"ח": r.amount} for r in parsed_data.table_a]},
+        "table_b": {"rows": [{"תיאור": r.description, "סכום בש\"ח": r.amount} for r in parsed_data.table_b]},
+        "table_c": {"rows": [{"תיאור": r.description, "אחוז": r.percentage} for r in parsed_data.table_c]},
+        "table_d": {"rows": [{"מסלול": r.track, "תשואה": r.return_rate} for r in parsed_data.table_d]},
+        "table_e": {"rows": [{
+            "שם המעסיק": r.employer,
+            "מועד": r.deposit_date,
+            "חודש": r.salary_month,
+            "שכר": r.salary,
+            "עובד": r.employee,
+            "מעסיק": r.employer_dep,
+            "פיצויים": r.severance,
+            "סה\"כ": r.total
+        } for r in parsed_data.table_e]}
+    }
     
     return data
 
-# ממשק משתמש
-st.title("📋 חילוץ נתונים פנסיוני - גירסה 28.0")
+# --- ממשק המשתמש (UI) ---
+st.title("📋 חילוץ נתונים פנסיוני - Vision Based (דיוק מלא)")
+
 client = init_client()
 
 if client:
-    file = st.file_uploader("העלה דוח PDF", type="pdf")
+    file = st.file_uploader("העלה דוח פנסיה מקוצר (PDF)", type="pdf")
+    
     if file:
-        with st.spinner("מעתיק נתונים כפי שהם (ללא שיקול דעת AI)..."):
-            raw_text = "\n".join([page.get_text() for page in fitz.open(stream=file.read(), filetype="pdf")])
-            data = process_audit_v28(client, raw_text)
+        with st.spinner("סורק את התמונות ומפענח טבלאות מורכבות..."):
+            pdf_bytes = file.read()
+            data = process_pdf_vision(client, pdf_bytes)
             
             if data:
                 perform_cross_validation(data)
-                # סדר עמודות: תיאור ראשון (ימין ב-RTL)
+                
+                # תצוגת הטבלאות
                 display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים", ["תיאור", "סכום בש\"ח"])
                 display_pension_table(data.get("table_b", {}).get("rows"), "ב. תנועות בקרן", ["תיאור", "סכום בש\"ח"])
                 display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
                 display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה", ["מסלול", "תשואה"])
                 display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות", ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
+else:
+    st.error("לא נמצא מפתח OpenAI (OPENAI_API_KEY). אנא הגדר אותו.")
