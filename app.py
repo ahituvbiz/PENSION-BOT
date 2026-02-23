@@ -1,3 +1,4 @@
+
 import streamlit as st
 import fitz
 import base64
@@ -71,7 +72,7 @@ def perform_cross_validation(data):
         if any(kw in desc for kw in ["הופקדו", "כספים שהופקדו"]):
             dep_b = clean_num(r.get("סכום בש\"ח", 0))
             break
-            
+
     rows_e = data.get("table_e", {}).get("rows", [])
     dep_e = clean_num(rows_e[-1].get("סה\"כ", 0)) if rows_e else 0.0
 
@@ -98,7 +99,7 @@ def process_pdf_vision(client, pdf_bytes):
         pix = page.get_pixmap(dpi=150)
         img_bytes = pix.tobytes("jpeg")
         base64_images.append(base64.b64encode(img_bytes).decode("utf-8"))
-        
+
     # 2. בניית הפרומפט והעברת התמונות
     messages = [
         {
@@ -122,10 +123,10 @@ def process_pdf_vision(client, pdf_bytes):
         response_format=PensionData,
         temperature=0 # חסימת "יצירתיות" של המודל
     )
-    
+
     # 4. חילוץ התשובה מהאיבר הראשון במערך התשובות (התיקון הקריטי)
     parsed_data = response.choices.message.parsed
-    
+
     # 5. המרה חזרה למבנה ה-JSON (לצורך תאימות מלאה לקוד התצוגה שלך)
     data = {
         "table_a": {"rows": [{"תיאור": r.description, "סכום בש\"ח": r.amount} for r in parsed_data.table_a]},
@@ -143,7 +144,7 @@ def process_pdf_vision(client, pdf_bytes):
             "סה\"כ": r.total
         } for r in parsed_data.table_e]}
     }
-    
+
     return data
 
 # --- ממשק המשתמש (UI) ---
@@ -153,15 +154,15 @@ client = init_client()
 
 if client:
     file = st.file_uploader("העלה דוח פנסיה מקוצר (PDF)", type="pdf")
-    
+
     if file:
         with st.spinner("סורק את התמונות ומפענח טבלאות מורכבות..."):
             pdf_bytes = file.read()
             data = process_pdf_vision(client, pdf_bytes)
-            
+
             if data:
                 perform_cross_validation(data)
-                
+
                 # תצוגת הטבלאות
                 display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים", ["תיאור", "סכום בש\"ח"])
                 display_pension_table(data.get("table_b", {}).get("rows"), "ב. תנועות בקרן", ["תיאור", "סכום בש\"ח"])
