@@ -126,28 +126,99 @@ TABLE IDENTIFICATION GUIDE:
 - table_a → תשלומים צפויים (expected future payments, has description + NIS amount)
 - table_b → תנועות בקרן / תנועות בחשבון (account movements: deposits, withdrawals, fees)
 - table_c → דמי ניהול / הוצאות (management fees as % of salary or savings)
-- table_d → מסלול השקעה / תשואה (investment tracks with % return)
+- table_d → מסלול השקעה / תשואה (investment tracks with % return) — SEE CRITICAL NOTES BELOW
 - table_e → פירוט הפקדות / הפקדות חודשיות (monthly deposit breakdown by component)
+
+CRITICAL NOTES FOR table_d (תשואות — Return Percentages):
+1. The section header is explicitly "ד. מסלולי השקעה ותשואות בתקופת הדוח" or similar.
+2. The return_percentage is the % figure that appears DIRECTLY next to the track name
+   inside the ד section ONLY — never take values from section ג (דמי ניהול).
+3. The ONLY reliable way to distinguish between table_c and table_d values is by
+   their SECTION HEADER — not by their size. Returns can be large (10%, 15%, 20%+).
+4. LEGAL RULE YOU MUST USE: דמי ניהול מחיסכון (management fee from savings) is
+   legally capped in Israel at 0.5% maximum. Any value above 0.5% CANNOT be a
+   management fee from savings — but it CAN be an investment return.
+5. DO NOT confuse section ג (דמי ניהול) with section ד (תשואות).
+   The two sections are physically adjacent in the PDF — always identify which
+   section a number belongs to by its section header (ג vs ד), not its magnitude.
+6. If the track name contains "מסלול" and is followed by a % figure in the
+   same box/cell under the ד header, that % is the תשואה — copy it EXACTLY.
 
 If a table cannot be found in the document, return an empty array [] for that key.
 """
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper: extract specific section from raw text by header keyword
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Section header keywords (in Hebrew) that mark the START of each table section
+_SECTION_HEADERS = [
+    "תשלומים צפויים",       # א
+    "תנועות בקרן",           # ב
+    "דמי ניהול",             # ג
+    "מסלולי השקעה",          # ד
+    "פירוט הפקדות",          # ה
+    "פרטי סוכן",             # ו — used only as an end-boundary
+]
+
+def extract_section(raw_text: str, section_keyword: str) -> str:
+    """
+    Return only the portion of raw_text that starts at the line containing
+    section_keyword and ends at the first line containing any other section header.
+    Falls back to the full raw_text if the keyword is not found.
+    """
+    lines = raw_text.splitlines()
+    start_idx = None
+
+    for i, line in enumerate(lines):
+        if section_keyword in line:
+            start_idx = i
+            break
+
+    if start_idx is None:
+        return raw_text  # keyword not found — return full text as fallback
+
+    # Find the end: first subsequent line that contains a DIFFERENT section header
+    end_idx = len(lines)
+    for i in range(start_idx + 1, len(lines)):
+        for header in _SECTION_HEADERS:
+            if header != section_keyword and header in lines[i]:
+                end_idx = i
+                break
+        if end_idx != len(lines):
+            break
+
+    return "\n".join(lines[start_idx:end_idx])
+
+
 def call_openai(raw_text: str, openai_client: openai.OpenAI) -> dict:
-    """Send raw PDF text to GPT-4o and return parsed JSON dict."""
+    """Send raw PDF text to GPT-4o and return parsed JSON dict.
+    
+    For table_d specifically, we extract only the text under the
+    'מסלולי השקעה' section header — eliminating any chance of
+    confusing returns (ד) with management fees (ג).
+    """
+    section_d_text = extract_section(raw_text, "מסלולי השקעה")
+
+    user_message = (
+        "Here is the raw text extracted from the pension PDF.\n"
+        "Extract the five tables according to your instructions.\n\n"
+        "=== FULL PDF TEXT ===\n"
+        f"{raw_text[:110_000]}\n\n"
+        "=== ISOLATED SECTION ד (מסלולי השקעה ותשואות) — USE THIS FOR table_d ONLY ===\n"
+        "The text below is ONLY the investment tracks section. "
+        "Extract table_d exclusively from this text — ignore any percentages "
+        "from the full text above when filling table_d.\n"
+        f"{section_d_text}"
+    )
+
     response = openai_client.chat.completions.create(
         model="gpt-4o",
         temperature=0,
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Here is the raw text extracted from the pension PDF. "
-                    "Extract the five tables according to your instructions.\n\n"
-                    f"{raw_text[:120_000]}"   # stay well within context limit
-                ),
-            },
+            {"role": "user", "content": user_message},
         ],
         timeout=120,
     )
@@ -386,6 +457,50 @@ def build_table_d(rows: list[dict]) -> pd.DataFrame:
     df["return_percentage"] = df["return_percentage"].apply(clean_num)
     return df
 
+
+def warn_table_d_sanity(table_d_df: pd.DataFrame, table_c_df: pd.DataFrame):
+    """
+    בדיקת שפיות לטבלה ד — מבוססת על כלל חוקי:
+    דמי ניהול מחיסכון מוגבלים בחוק ל-0.5% מקסימום.
+    לכן אם ערך בטבלה ג (דמי ניהול מחיסכון) עולה על 0.5% — כנראה שחולצה תשואה בטעות.
+    בנוסף: אם ערך בטבלה ד זהה לאחד מהערכים בטבלה ג — כנראה שאותו מספר הועתק מהסעיף הלא נכון.
+    """
+    # בדיקה 1: דמי ניהול מחיסכון בטבלה ג לא יכולים לעלות על 0.5%
+    if table_c_df is not None and not table_c_df.empty and "percentage" in table_c_df.columns:
+        for _, row in table_c_df.iterrows():
+            val = row.get("percentage")
+            if val is None or (isinstance(val, float) and math.isnan(val)):
+                continue
+            desc = str(row.get("description", "")).lower()
+            if "חיסכון" in desc and float(val) > 0.5:
+                st.warning(
+                    f"⚠️ **בדיקת שפיות — טבלה ג:** דמי ניהול מחיסכון **{val}%** עולים על "
+                    f"המקסימום החוקי של 0.5%. ייתכן שחולצה תשואה (טבלה ד) במקום דמי ניהול. "
+                    f"אנא בדוק מול ה-PDF המקורי."
+                )
+
+    # בדיקה 2: ערך בטבלה ד זהה לערך בטבלה ג — סימן אזהרה לבלבול בין הסעיפים
+    if table_d_df is None or table_d_df.empty or "return_percentage" not in table_d_df.columns:
+        return
+    if table_c_df is None or table_c_df.empty or "percentage" not in table_c_df.columns:
+        return
+
+    c_values = set(
+        round(float(v), 4)
+        for v in table_c_df["percentage"].dropna()
+    )
+
+    for _, row in table_d_df.iterrows():
+        val = row.get("return_percentage")
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            continue
+        if round(float(val), 4) in c_values:
+            st.warning(
+                f"⚠️ **בדיקת שפיות — טבלה ד:** התשואה **{val}%** עבור מסלול "
+                f'"{row.get("track_name", "")}" זהה לאחד מערכי דמי הניהול בטבלה ג. '
+                f"ייתכן בלבול בין סעיף ג לסעיף ד. אנא בדוק מול ה-PDF המקורי."
+            )
+
 def build_table_e(rows: list[dict]) -> pd.DataFrame:
     fixed = fix_table_e_shifts(rows)
     df = pd.DataFrame(fixed, columns=["month", "salary", "employee", "employer", "severance", "total"])
@@ -484,6 +599,10 @@ if uploaded_file:
         except Exception:
             st.stop()
 
+    section_d_preview = extract_section(raw_text, "מסלולי השקעה")
+    with st.expander("📌 Isolated Section ד text (מסלולי השקעה) — sent to GPT-4o for table_d", expanded=False):
+        st.text(section_d_preview if section_d_preview != raw_text else "⚠️ Section header 'מסלולי השקעה' not found — full text was used as fallback")
+
     with st.expander("🛠️ Raw JSON from GPT-4o (debug)", expanded=False):
         st.json(extracted)
 
@@ -516,6 +635,8 @@ if uploaded_file:
 
     for key in ["table_a", "table_b", "table_c", "table_d", "table_e"]:
         display_table(key, dfs[key])
+        if key == "table_d":
+            warn_table_d_sanity(dfs.get("table_d"), dfs.get("table_c"))
         st.markdown("---")
 
     # ── Step 6: Download as Excel ──
