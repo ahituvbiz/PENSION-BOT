@@ -52,29 +52,42 @@ TABLE_A_LAST_ROW = "שחרור מתשלום הפקדות לקרן במקרה ש�
 
 def find_sections(words):
     """
-    מחזיר לכל סעיף: page, y0 (שורת הכותרת), x_min, x_max (עמודת הסעיף).
-    X range נקבע לפי רוחב הכותרת עצמה + margin נדיב.
+    מחזיר לכל סעיף: page, y0, x_min, x_max.
+    מחפש כותרות לפי שתי שיטות:
+    1. כל מילות המפתח מופיעות באותה שורה
+    2. חיבור הטקסט מכיל את מחרוזת המפתח
     """
-    # קיבוץ מילים לשורות לפי (page, y_bucket)
+    # קיבוץ לשורות עם y_bucket רחב יותר (6px) לקליטת RTL לא מיושר
     buckets = defaultdict(list)
     for w in words:
-        bucket_y = round(w["y0"] / 4) * 4
+        bucket_y = round(w["y0"] / 6) * 6
         buckets[(w["page"], bucket_y)].append(w)
 
     sections = {}
-    for (page, _), line_words in buckets.items():
-        line_text = " ".join(w["text"] for w in reversed(sorted(line_words, key=lambda w: w["x0"])))
+    for (page, _), line_words in sorted(buckets.items()):
+        # בנה את הטקסט בשני כיוונים — LTR ו-RTL
+        ltr = " ".join(w["text"] for w in sorted(line_words, key=lambda w: w["x0"]))
+        rtl = " ".join(w["text"] for w in sorted(line_words, key=lambda w: -w["x0"]))
+        # גם ללא רווחים (מילים דבוקות ב-PDF)
+        ltr_nospace = "".join(w["text"] for w in sorted(line_words, key=lambda w: w["x0"]))
+        rtl_nospace = "".join(w["text"] for w in sorted(line_words, key=lambda w: -w["x0"]))
+
         for sec_id, kws in SECTION_KEYWORDS.items():
-            if sec_id not in sections and any(line_text.strip().startswith(kw) or kw in line_text for kw in kws):
-                xs = [w["x0"] for w in line_words] + [w["x1"] for w in line_words]
-                ys = [w["y0"] for w in line_words]
-                sections[sec_id] = {
-                    "page":  page,
-                    "y0":    min(ys),
-                    "x_min": min(xs),
-                    "x_max": max(xs),
-                    "page_width": line_words[0]["page_width"]
-                }
+            if sec_id in sections:
+                continue
+            for kw in kws:
+                # בדוק את כל 4 הווריאנטים
+                if any(kw in s for s in [ltr, rtl, ltr_nospace, rtl_nospace]):
+                    xs = [w["x0"] for w in line_words] + [w["x1"] for w in line_words]
+                    ys = [w["y0"] for w in line_words]
+                    sections[sec_id] = {
+                        "page":       page,
+                        "y0":         min(ys),
+                        "x_min":      min(xs),
+                        "x_max":      max(xs),
+                        "page_width": line_words[0]["page_width"]
+                    }
+                    break
     return sections
 
 def get_section_x_range(sec_info, all_sections, margin=30):
@@ -428,9 +441,21 @@ if file:
 
     if st.checkbox("🔍 Debug — שורות לפי סעיף"):
         sec_names = {"a":"א","b":"ב","c":"ג","d":"ד","e":"ה"}
-        for k in "abcde":
-            sec = sections.get(k, {})
-            xr = get_section_x_range(sec, sections) if sec else (0,0)
-            with st.expander(f"סעיף {sec_names[k]} — {len(lines[k])} שורות | X: {xr[0]:.0f}–{xr[1]:.0f}"):
-                for ln in lines[k]:
-                    st.text(ltext(ln))
+        
+        # אם אף סעיף לא נמצא — הצג טקסט גולמי לאבחון
+        if not sections:
+            st.error("⚠️ לא נמצאה אף כותרת סעיף! הצגת 50 השורות הראשונות של הדוח:")
+            buckets = defaultdict(list)
+            for w in words:
+                buckets[(w["page"], round(w["y0"]/6)*6)].append(w)
+            for i, ((page, _), lw) in enumerate(sorted(buckets.items())):
+                rtl = " ".join(w["text"] for w in sorted(lw, key=lambda w: -w["x0"]))
+                st.text(f"עמוד {page} | {rtl}")
+                if i > 50: break
+        else:
+            for k in "abcde":
+                sec = sections.get(k, {})
+                xr = get_section_x_range(sec, sections) if sec else (0,0)
+                with st.expander(f"סעיף {sec_names[k]} — {len(lines[k])} שורות | X: {xr[0]:.0f}–{xr[1]:.0f}"):
+                    for ln in lines[k]:
+                        st.text(ltext(ln))
