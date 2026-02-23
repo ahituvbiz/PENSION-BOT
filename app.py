@@ -7,15 +7,15 @@ import re
 import io
 from openai import OpenAI
 
-# הגדרות RTL ועיצוב קשיח למניעת "יוזמות" AI
-st.set_page_config(page_title="מנתח פנסיה - גרסה 35.0", layout="wide")
+# הגדרות RTL ועיצוב
+st.set_page_config(page_title="מנתח פנסיה - גרסה 36.0", layout="wide")
 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700&display=swap');
     * { font-family: 'Assistant', sans-serif; direction: rtl; text-align: right; }
     .stTable { direction: rtl !important; width: 100%; }
-    th, td { text-align: right !important; padding: 12px !important; white-space: nowrap; }
+    th, td { text-align: right !important; padding: 10px !important; white-space: nowrap; }
     .val-success { padding: 12px; border-radius: 8px; margin-bottom: 10px; font-weight: bold; background-color: #f0fdf4; border: 1px solid #16a34a; color: #16a34a; }
 </style>
 """, unsafe_allow_html=True)
@@ -32,7 +32,6 @@ def clean_num(val):
     except: return 0.0
 
 def perform_cross_validation(data):
-    """אימות הצלבה בין טבלה ב' ל-ה'"""
     dep_b = 0.0
     for r in data.get("table_b", {}).get("rows", []):
         row_str = " ".join(str(v) for v in r.values())
@@ -52,19 +51,12 @@ def get_styled_df(rows, col_order):
     existing = [c for c in col_order if c in df.columns]
     return df[existing]
 
-def process_audit_v35(client, text):
-    # פרומפט "מעתיק מכני" (גירסה 29)
+def process_audit_v36(client, text):
     prompt = f"""You are a MECHANICAL SCRIBE. Your ONLY job is to transcribe text to JSON with ZERO intelligence applied.
-    
-    STRICT RULES FOR EXTRACTION:
-    1. DIGIT-BY-DIGIT COPYING: If a number is '67', do not write '76'. If it is '0.17', do not write '1.0'. 
-    2. TABLE D (CLAL SPECIAL): Join multiline track names. Find the EXACT '%' value nearby.
-    3. NO ROUNDING: Copy decimals exactly as they appear.
-    4. TABLE E SUMMARY:
-       - The last row is 'סה"כ'. 
-       - The largest number in that row (Total of totals) MUST go into 'סה"כ'.
-       - Clear 'מועד' and 'חודש' fields for this row.
-    
+    STRICT RULES:
+    1. ZERO ROUNDING: Copy decimals exactly (e.g., 0.17% stays 0.17%).
+    2. TABLE D: Join multiline track names. Map '%' exactly.
+    3. TABLE E: Stop at 'סה"כ'. The largest sum in that row must go into 'סה"כ'. Clear 'מועד' and 'חודש'.
     JSON STRUCTURE:
     {{
       "table_a": {{"rows": [{{"תיאור": "", "סכום בש\"ח": ""}}]}},
@@ -77,33 +69,33 @@ def process_audit_v35(client, text):
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "You are a mechanical character-copying tool. No brain. No rounding. No logic."},
+        messages=[{"role": "system", "content": "OCR mode. Copy verbatim. No logic. No rounding."},
                   {"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
     )
     data = json.loads(res.choices[0].message.content)
     
+    # תיקון שורת סיכום ב-Python
     rows_e = data.get("table_e", {}).get("rows", [])
     if len(rows_e) > 1:
         last_row = rows_e[-1]
         salary_sum = sum(clean_num(r.get("שכר", 0)) for r in rows_e[:-1])
-        vals = [last_row.get("עובד"), last_row.get("מעסיק"), last_row.get("פיצויים"), last_row.get("סה\"כ")]
-        cleaned_vals = [clean_num(v) for v in vals]
-        max_val = max(cleaned_vals)
-        if max_val > 0 and clean_num(last_row.get("סה\"כ")) != max_val:
-            non_zero_vals = [v for v in vals if clean_num(v) > 0]
-            if len(non_zero_vals) == 4:
-                last_row["סה\"כ"], last_row["פיצויים"], last_row["מעסיק"], last_row["עובד"] = non_zero_vals[3], non_zero_vals[2], non_zero_vals[1], non_zero_vals[0]
-            elif len(non_zero_vals) == 3:
-                last_row["סה\"כ"], last_row["מעסיק"], last_row["עובד"] = non_zero_vals[2], non_zero_vals[1], non_zero_vals[0]
-                last_row["פיצויים"] = "0"
+        vals = [last_row.get(k) for k in ["עובד", "מעסיק", "פיצויים", "סה\"כ"]]
+        c_vals = [clean_num(v) for v in vals]
+        max_v = max(c_vals)
+        if max_v > 0 and clean_num(last_row.get("סה\"כ")) != max_v:
+            non_zero = [v for v in vals if clean_num(v) > 0]
+            if len(non_zero) >= 3:
+                last_row["סה\"כ"] = non_zero[-1]
+                last_row["מעסיק"] = non_zero[-2]
+                last_row["עובד"] = non_zero[-3]
         last_row["שכר"] = f"{salary_sum:,.0f}"
         last_row["מועד"], last_row["חודש"], last_row["שם המעסיק"] = "", "", "סה\"כ"
     return data
 
-# ממשק
-st.title("📋 חילוץ נתונים פנסיוני - גרסה 35.0 (תיקון שגיאת סינטקס)")
+# ממשק משתמש
+st.title("📋 חילוץ נתונים פנסיוני - גרסה 36.0")
 client = init_client()
 
 if client:
@@ -111,12 +103,11 @@ if client:
     if file:
         with st.spinner("מעתיק נתונים במדויק..."):
             raw_text = "\n".join([page.get_text() for page in fitz.open(stream=file.read(), filetype="pdf")])
-            data = process_audit_v35(client, raw_text)
+            data = process_audit_v36(client, raw_text)
             
             if data:
                 perform_cross_validation(data)
                 
-                # הכנת DataFrames
                 dfs = {
                     "A": get_styled_df(data.get("table_a", {}).get("rows"), ["תיאור", "סכום בש\"ח"]),
                     "B": get_styled_df(data.get("table_b", {}).get("rows"), ["תיאור", "סכום בש\"ח"]),
@@ -129,11 +120,10 @@ if client:
                     st.subheader(title)
                     st.table(dfs[k])
                 
-                # יצירת קובץ אקסל מאוחד - תיקון הסוגריים החסרים
+                # יצירת קובץ אקסל מאוחד - תיקון הסוגריים
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     sheet_name = 'ריכוז נתונים'
-                    # כתיבת טבלאות לפי עמודות מבוקשות
                     if dfs["A"] is not None: dfs["A"].to_excel(writer, sheet_name=sheet_name, startcol=1, startrow=1, index=False)
                     if dfs["B"] is not None: dfs["B"].to_excel(writer, sheet_name=sheet_name, startcol=4, startrow=1, index=False)
                     if dfs["C"] is not None: dfs["C"].to_excel(writer, sheet_name=sheet_name, startcol=7, startrow=1, index=False)
@@ -144,7 +134,7 @@ if client:
                     worksheet = writer.sheets[sheet_name]
                     fmt = workbook.add_format({'bold': True, 'align': 'right'})
                     
-                    # הוספת כותרות - תיקון הסוגריים כאן
+                    # הוספת כותרות - תיקון סוגריים מלא
                     worksheet.write(0, 1, "טבלה א - תשלומים צפויים", fmt)
                     worksheet.write(0, 4, "טבלה ב - תנועות בקרן", fmt)
                     worksheet.write(0, 7, "טבלה ג - דמי ניהול", fmt)
@@ -156,6 +146,6 @@ if client:
                 st.download_button(
                     label="📥 הורד קובץ Excel מאוחד",
                     data=output.getvalue(),
-                    file_name="pension_unified_report.xlsx",
+                    file_name="pension_report_v36.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
