@@ -252,12 +252,15 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
             result["total_salaries"] = total_salary
             result["total_deposits"] = total_deposits
 
-    # ── שנה ורבעון ──
-    m = re.search(r"לסוף הרבעון ה- (\d).*?(\d{4})", rev_text)
-    if m:
-        result["report_quarter"] = int(m.group(1))
-        y = int(m.group(2))
-        result["report_year"] = y if y < 3000 else int(str(y)[::-1])
+    # ── שנה ורבעון — חיפוש נפרד (שורה אחת לרבעון, שורה אחרת לשנה) ──
+    m_q = re.search(r"לסוף הרבעון ה[-–]\s*(\d)", rev_text)
+    m_y = re.search(r"לשנת\s+(\d{4})", rev_text)
+    if m_q:
+        result["report_quarter"] = int(m_q.group(1))
+    if m_y:
+        y = int(m_y.group(1))
+        # הטקסט הפוך — השנה עשויה להגיע כ-"5202" (2025 הפוך)
+        result["report_year"] = y if y < 2100 else int(str(y)[::-1])
 
     return result
 
