@@ -127,10 +127,9 @@ def anonymize_pii(text):
 def extract_numeric_data(pdf_bytes: bytes) -> dict:
     """
     חולץ את כל הנתונים המספריים ישירות מה-PDF.
-    מטפל ב-RTL הפוך: pdfplumber מחזיר שורות ומספרים הפוכים.
+    גמיש לפורמטים שונים (אלטשולר, מגדל, כלל, מנורה, מיטב, מור ועוד).
     """
     result = {}
-
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             raw = "".join((p.extract_text() or "") + "\n" for p in pdf.pages)
@@ -138,7 +137,6 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
     except Exception:
         return result
 
-    # הפוך כל שורה — מתקן RTL הפוך
     rev_lines = [l[::-1] for l in raw.split("\n")]
     rev_text  = "\n".join(rev_lines)
 
@@ -151,26 +149,60 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
         m = re.search(pattern, rev_text)
         return rev_num(m.group(1)) if m else None
 
-    # ── דמי ניהול (% הפוך) ──
-    m = re.search(r"דמי ניהול מהפקדה\s*%(\d+\.\d+)", rev_text)
-    result["deposit_fee"] = float(m.group(1)[::-1]) if m else None
+    def find_table_by_label(tbls, label_keywords):
+        """מוצא טבלה לפי מילות מפתח בעמודת התוויות"""
+        for t in tbls:
+            for row in t:
+                if row and len(row) > 1 and row[1]:
+                    if any(kw in str(row[1]) for kw in label_keywords):
+                        return t
+        return None
 
-    m = re.search(r"דמי ניהול מחיסכון\s*%(\d+\.\d+)", rev_text)
-    result["accumulation_fee"] = float(m.group(1)[::-1]) if m else None
+    # ── דמי ניהול ──
+    # אלטשולר: % הפוך בטקסט | מגדל ואחרות: טבלה נפרדת עם % ישר
+    m = re.search(r"דמי ניהול מהפקדה\s*%([\d.]+)", rev_text)
+    if m:
+        result["deposit_fee"] = float(m.group(1)[::-1])
+    else:
+        t = find_table_by_label(tables, ["הדקפהמ לוהינ ימד"])
+        if t:
+            for row in t:
+                try:
+                    v = str(row[0]).strip()
+                    if "%" in v and "הדקפהמ" in str(row[1]):
+                        result["deposit_fee"] = float(v.replace("%",""))
+                except: pass
 
-    # ── קצבאות מסעיף א' (מספרים הפוכים) ──
-    result["monthly_pension"]    = find_rev(r"קצבה חודשית הצפויה לך בפרישה בגיל.*?\s+([\d,]+)\s")
+    m = re.search(r"דמי ניהול מחיסכון\s*%([\d.]+)", rev_text)
+    if m:
+        result["accumulation_fee"] = float(m.group(1)[::-1])
+    else:
+        t = find_table_by_label(tables, ["ןוכסיחמ לוהינ ימד"])
+        if t:
+            for row in t:
+                try:
+                    v = str(row[0]).strip()
+                    if "%" in v and "ןוכסיחמ" in str(row[1]):
+                        result["accumulation_fee"] = float(v.replace("%",""))
+                except: pass
+
+    # ── קצבאות מסעיף א' ──
+    # חלק מהדוחות: "גיל 67 ** 853" — הקצבה אחרי **
+    m = re.search(r"קצבה חודשית הצפויה לך בפרישה בגיל.*?\*\*\s*([\d,]+)", rev_text)
+    result["monthly_pension"] = rev_num(m.group(1)) if m else \
+        find_rev(r"קצבה חודשית הצפויה לך בפרישה בגיל.*?\s+([\d,]+)\s")
     result["widow_pension"]      = find_rev(r"קצבה חודשית לאלמן/ה במקרה מוות\s+([\d,]+)")
     result["disability_pension"] = find_rev(r"קצבה חודשית במקרה של נכות מלאה\s+([\d,]+)")
     result["disability_release"] = find_rev(r"שחרור מתשלום הפקדות לקרן במקרה של נכות\s+([\d,]+)")
 
-    # ── תנועות בקרן (טבלה 2 — מספרים ישרים) ──
-    if len(tables) >= 2:
-        for row in tables[1]:
+    # ── תנועות בקרן — חיפוש גמיש לפי תוכן ──
+    t_mov = find_table_by_label(tables, ["הנשה תליחתב ןרקב םיפסכה תרתי"])
+    if t_mov:
+        for row in t_mov:
             try:
                 val   = float(str(row[0]).replace(",","").strip())
                 label = str(row[1])[::-1].strip() if row[1] else ""
-                if "יתרת הכספים בקרן נכון" in label:
+                if "יתרת הכספים בקרן" in label and any(x in label for x in ["נכון","ב-","ב31","31/0"]):
                     result["accumulation"] = val
                 elif "עלות ביטוח לסיכוני נכות" in label:
                     result["disability_insurance_cost"] = abs(val)
@@ -178,17 +210,43 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
                     result["death_insurance_cost"] = abs(val)
             except: pass
 
-    # ── הפקדות (טבלה 4) ──
-    # עמודות: [פיצויים(0), מעסיק(1), עובד(2), משכורת(3), חודש(4), מועד(5)]
-    # סה"כ הפקדות = פיצויים + מעסיק + עובד
-    if len(tables) >= 4:
+    # ── הפקדות — חיפוש גמיש, זיהוי חכם של עמודות ──
+    t_dep = find_table_by_label(tables, ["תרוכשמ"])
+    if not t_dep:
+        for t in tables:
+            if t and t[0] and any("תרוכשמ" in str(c) for c in t[0] if c):
+                t_dep = t; break
+
+    if t_dep:
+        header = t_dep[0]
+        # עמודת משכורת (לא "שדוח רובע תרוכשמ" = עבור חודש משכורת)
+        sal_col = next((i for i,h in enumerate(header)
+                        if h and "תרוכשמ" in str(h) and "שדוח" not in str(h)), None)
+        # עמודת סה"כ הפקדות — אם קיימת בכותרת
+        total_col = next((i for i,h in enumerate(header)
+                          if h and any(x in str(h) for x in ['כ"הס', 'סה"כ', "כ'הס"])), None)
+
         total_salary = total_deposits = 0.0
-        for row in tables[3][1:]:  # דלג על שורת כותרת
+        for row in t_dep[1:]:
             try:
-                sal = float(str(row[3]).replace(",",""))
-                dep = sum(float(str(row[i]).replace(",","")) for i in range(3))
-                total_salary   += sal
-                total_deposits += dep
+                sal = float(str(row[sal_col]).replace(",","")) if sal_col is not None else 0
+                if sal <= 0: continue
+                if total_col is not None:
+                    # יש עמודת סה"כ מוכנה (מגדל ואחרות)
+                    dep = float(str(row[total_col]).replace(",",""))
+                else:
+                    # אין עמודת סה"כ — סכום כל עמודות הנומריות (פיצויים+מעסיק+עובד)
+                    dep = 0.0
+                    for i, cell in enumerate(row):
+                        if i == sal_col: continue
+                        cell_str = str(cell or "").strip()
+                        if re.match(r"^[\d,]+$", cell_str):
+                            dep += float(cell_str.replace(",",""))
+                        elif "/" in cell_str:
+                            break  # הגענו לתאריך — עצור
+                if dep > 0:
+                    total_salary   += sal
+                    total_deposits += dep
             except: pass
         if total_salary > 0:
             result["total_salaries"] = total_salary
@@ -202,7 +260,6 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
         result["report_year"] = y if y < 3000 else int(str(y)[::-1])
 
     return result
-
 
 # ─── חישובים ────────────────────────────────────────────────
 def estimate_years_to_retirement(accumulation, monthly_pension):
@@ -363,7 +420,10 @@ def format_full_analysis(numeric_data: dict, gpt_result: dict, gender: str, fami
         if gender == "אישה" or young_man:
             lines.append("\n💡 **מומלץ לשקול לשנות את מסלול הביטוח** כך שיקנה לך ולמשפחתך הגנה ביטוחית מקסימלית.")
     elif insured_salary is not None:
-        lines.append("\n✅ **הכיסוי הביטוחי בקרן תקין ומקסימלי.**")
+        # רווק עם ביטוח שארים לא תקין (0 או >13 ₪) — הכיסוי הביטוחי מבחינת ביטוח שארים איננו במצב האידיאלי
+        single_insurance_ok = not is_single or (death_cost_val >= 1 and annual_death <= 13)
+        if single_insurance_ok:
+            lines.append("\n✅ **הכיסוי הביטוחי בקרן תקין ומקסימלי.**")
 
     return "\n".join(lines)
 
