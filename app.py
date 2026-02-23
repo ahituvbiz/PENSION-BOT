@@ -1,4 +1,3 @@
-
 import streamlit as st
 import fitz
 import base64
@@ -171,4 +170,5 @@ if client:
                 display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות", ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
 else:
     st.error("לא נמצא מפתח OpenAI (OPENAI_API_KEY). אנא הגדר אותו.")
-```
+
+
