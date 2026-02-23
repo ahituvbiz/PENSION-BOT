@@ -7,7 +7,7 @@ import re
 from openai import OpenAI
 
 # הגדרות תצוגה RTL
-st.set_page_config(page_title="מנתח פנסיה - גרסה 24.0", layout="wide")
+st.set_page_config(page_title="מנתח פנסיה - גרסה 25.0", layout="wide")
 
 st.markdown("""
 <style>
@@ -25,14 +25,14 @@ def init_client():
     return OpenAI(api_key=api_key) if api_key else None
 
 def clean_num(val):
-    if val is None or val == "" or str(val).strip() in ["-", "nan"]: return 0.0
+    if val is None or val == "" or str(val).strip() in ["-", "nan", "."]: return 0.0
     try:
         cleaned = re.sub(r'[^\d\.\-]', '', str(val).replace(",", "").replace("−", "-"))
         return float(cleaned) if cleaned else 0.0
     except: return 0.0
 
 def perform_cross_validation(data):
-    """אימות הפקדות בלבד בין טבלה ב' ל-ה'"""
+    """אימות הצלבה משופר לזיהוי הנתון הנכון בטבלה ב'"""
     dep_b = 0.0
     for r in data.get("table_b", {}).get("rows", []):
         row_str = " ".join(str(v) for v in r.values())
@@ -58,12 +58,17 @@ def display_pension_table(rows, title, col_order):
     st.subheader(title)
     st.table(df)
 
-def process_audit_v24(client, text):
+def process_audit_v25(client, text):
     prompt = f"""Extract ALL tables into JSON.
-    TABLE E STOP RULE:
-    1. Extract every row. STOP after the summary row starting with 'סה"כ'.
-    2. SUMMARY ROW: Map 'עובד', 'מעסיק', and 'פיצויים' exactly from the PDF.
-    3. Ensure 'עובד' value is from the employee column and 'מעסיק' from employer column.
+    
+    TABLE E TOTAL ROW RULES:
+    1. The summary row (סה"כ) must be the LAST row.
+    2. STRICT MAPPING:
+       - The largest sum (e.g., 23,034) MUST be in the 'סה"כ' key.
+       - The employee sum (e.g., 7,469) MUST be in the 'עובד' key.
+       - The employer sum (e.g., 8,096) MUST be in the 'מעסיק' key.
+       - The severance sum (e.g., 7,469) MUST be in the 'פיצויים' key.
+    3. NO DATES: The fields 'מועד' and 'חודש' in the summary row MUST be empty.
     
     JSON STRUCTURE:
     {{
@@ -77,25 +82,43 @@ def process_audit_v24(client, text):
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "Forensic financial auditor. Map summary columns strictly."},
+        messages=[{"role": "system", "content": "Financial Auditor. Strictly map the total row sums to the correct keys."},
                   {"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
     )
     data = json.loads(res.choices[0].message.content)
     
-    # חישוב שכר ב-Python
+    # חישוב שכר ויישור שורת סיכום ב-Python
     rows_e = data.get("table_e", {}).get("rows", [])
     if len(rows_e) > 1:
+        last_row = rows_e[-1]
+        
+        # 1. חישוב שכר
         salary_sum = sum(clean_num(r.get("שכר", 0)) for r in rows_e[:-1])
-        rows_e[-1]["שכר"] = f"{salary_sum:,.0f}"
-        rows_e[-1]["מועד"] = ""
-        rows_e[-1]["חודש"] = ""
+        
+        # 2. תיקון הסטה: אם סכום ההפקדות (23,034) נחת ב'פיצויים' במקום ב'סה"כ'
+        current_total = clean_num(last_row.get("סה\"כ"))
+        current_sev = clean_num(last_row.get("פיצויים"))
+        
+        if current_sev > current_total and current_sev > 100:
+            # ביצוע הזזה מתקנת שמאלה של הערכים
+            last_row["סה\"כ"] = last_row.get("פיצויים")
+            last_row["פיצויים"] = last_row.get("מעסיק")
+            last_row["מעסיק"] = last_row.get("עובד")
+            # הערך של העובד נמצא בד"כ ב'שכר' בגלל ההסטה
+            last_row["עובד"] = last_row.get("שכר") 
+            
+        # 3. קיבוע שכר וניקוי תאריכים
+        last_row["שכר"] = f"{salary_sum:,.0f}"
+        last_row["מועד"] = ""
+        last_row["חודש"] = ""
+        last_row["שם המעסיק"] = "סה\"כ"
     
     return data
 
 # ממשק
-st.title("📋 חילוץ נתונים פנסיוני - גרסה 24.0")
+st.title("📋 חילוץ נתונים פנסיוני - גרסה 25.0")
 client = init_client()
 
 if client:
@@ -103,7 +126,7 @@ if client:
     if file:
         with st.spinner("מחלץ ומאמת נתונים..."):
             raw_text = "\n".join([page.get_text() for page in fitz.open(stream=file.read(), filetype="pdf")])
-            data = process_audit_v24(client, raw_text)
+            data = process_audit_v25(client, raw_text)
             
             if data:
                 perform_cross_validation(data)
