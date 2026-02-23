@@ -7,8 +7,8 @@ import re
 import io
 from openai import OpenAI
 
-# הגדרות RTL ועיצוב קשיח
-st.set_page_config(page_title="מנתח פנסיה - גירסה 34.0", layout="wide")
+# הגדרות RTL ועיצוב קשיח למניעת "יוזמות" AI
+st.set_page_config(page_title="מנתח פנסיה - גרסה 35.0", layout="wide")
 
 st.markdown("""
 <style>
@@ -32,13 +32,13 @@ def clean_num(val):
     except: return 0.0
 
 def perform_cross_validation(data):
+    """אימות הצלבה בין טבלה ב' ל-ה'"""
     dep_b = 0.0
     for r in data.get("table_b", {}).get("rows", []):
         row_str = " ".join(str(v) for v in r.values())
         if any(kw in row_str for kw in ["הופקדו", "כספים שהופקדו"]):
             nums = [clean_num(v) for v in r.values() if clean_num(v) > 10]
-            if nums: dep_b = nums[0]
-            break
+            if nums: dep_b = nums[0]; break
             
     rows_e = data.get("table_e", {}).get("rows", [])
     dep_e = clean_num(rows_e[-1].get("סה\"כ", 0)) if rows_e else 0.0
@@ -52,18 +52,17 @@ def get_styled_df(rows, col_order):
     existing = [c for c in col_order if c in df.columns]
     return df[existing]
 
-def process_audit_v34(client, text):
-    # פרומפט גירסה 29 המקורי
+def process_audit_v35(client, text):
+    # פרומפט "מעתיק מכני" (גירסה 29)
     prompt = f"""You are a MECHANICAL SCRIBE. Your ONLY job is to transcribe text to JSON with ZERO intelligence applied.
     
     STRICT RULES FOR EXTRACTION:
-    1. DIGIT-BY-DIGIT COPYING: If a number is '67', do not write '76'. If it is '0.17', do not write '1.0'.
-    2. TABLE D (CLAL SPECIAL): Track names in 'Clal' often span multiple lines. Join them into one name. Find the number with the '%' sign nearby and copy it EXACTLY as the 'תשואה'. 
-    3. NO ROUNDING: Do not round any percentages. If it has two decimal places, copy both.
+    1. DIGIT-BY-DIGIT COPYING: If a number is '67', do not write '76'. If it is '0.17', do not write '1.0'. 
+    2. TABLE D (CLAL SPECIAL): Join multiline track names. Find the EXACT '%' value nearby.
+    3. NO ROUNDING: Copy decimals exactly as they appear.
     4. TABLE E SUMMARY:
        - The last row is 'סה"כ'. 
        - The largest number in that row (Total of totals) MUST go into 'סה"כ'.
-       - Map Employee/Employer/Severance sums digit-by-digit.
        - Clear 'מועד' and 'חודש' fields for this row.
     
     JSON STRUCTURE:
@@ -78,7 +77,7 @@ def process_audit_v34(client, text):
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "Mechanical OCR mode. Zero logic. No rounding."},
+        messages=[{"role": "system", "content": "You are a mechanical character-copying tool. No brain. No rounding. No logic."},
                   {"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
@@ -104,7 +103,7 @@ def process_audit_v34(client, text):
     return data
 
 # ממשק
-st.title("📋 חילוץ נתונים פנסיוני - גירסה 34.0 (גיליון אקסל מאוחד)")
+st.title("📋 חילוץ נתונים פנסיוני - גרסה 35.0 (תיקון שגיאת סינטקס)")
 client = init_client()
 
 if client:
@@ -112,52 +111,51 @@ if client:
     if file:
         with st.spinner("מעתיק נתונים במדויק..."):
             raw_text = "\n".join([page.get_text() for page in fitz.open(stream=file.read(), filetype="pdf")])
-            data = process_audit_v34(client, raw_text)
+            data = process_audit_v35(client, raw_text)
             
             if data:
                 perform_cross_validation(data)
                 
-                # הכנת ה-DataFrames
-                df_a = get_styled_df(data.get("table_a", {}).get("rows"), ["תיאור", "סכום בש\"ח"])
-                df_b = get_styled_df(data.get("table_b", {}).get("rows"), ["תיאור", "סכום בש\"ח"])
-                df_c = get_styled_df(data.get("table_c", {}).get("rows"), ["תיאור", "אחוז"])
-                df_d = get_styled_df(data.get("table_d", {}).get("rows"), ["מסלול", "תשואה"])
-                df_e = get_styled_df(data.get("table_e", {}).get("rows"), ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
+                # הכנת DataFrames
+                dfs = {
+                    "A": get_styled_df(data.get("table_a", {}).get("rows"), ["תיאור", "סכום בש\"ח"]),
+                    "B": get_styled_df(data.get("table_b", {}).get("rows"), ["תיאור", "סכום בש\"ח"]),
+                    "C": get_styled_df(data.get("table_c", {}).get("rows"), ["תיאור", "אחוז"]),
+                    "D": get_styled_df(data.get("table_d", {}).get("rows"), ["מסלול", "תשואה"]),
+                    "E": get_styled_df(data.get("table_e", {}).get("rows"), ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
+                }
                 
-                # תצוגה במסך
-                st.subheader("א. תשלומים צפויים")
-                st.table(df_a)
-                st.subheader("ב. תנועות בקרן")
-                st.table(df_b)
-                st.subheader("ג. דמי ניהול והוצאות")
-                st.table(df_c)
-                st.subheader("ד. מסלולי השקעה")
-                st.table(df_d)
-                st.subheader("ה. פירוט הפקדות")
-                st.table(df_e)
+                for k, title in zip(["A", "B", "C", "D", "E"], ["א. תשלומים צפויים", "ב. תנועות בקרן", "ג. דמי ניהול והוצאות", "ד. מסלולי השקעה", "ה. פירוט הפקדות"]):
+                    st.subheader(title)
+                    st.table(dfs[k])
                 
-                # יצירת קובץ אקסל - גיליון אחד עם מיקומים ספציפיים
+                # יצירת קובץ אקסל מאוחד - תיקון הסוגריים החסרים
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    sheet_name = 'ריכוז נתונים פנסיוני'
-                    # כתיבת הטבלאות לפי העמודות שביקשת (A=0, B=1, E=4, H=7, K=10, N=13)
-                    if df_a is not None:
-                        df_a.to_excel(writer, sheet_name=sheet_name, startcol=1, startrow=1, index=False)
-                    if df_b is not None:
-                        df_b.to_excel(writer, sheet_name=sheet_name, startcol=4, startrow=1, index=False)
-                    if df_c is not None:
-                        df_c.to_excel(writer, sheet_name=sheet_name, startcol=7, startrow=1, index=False)
-                    if df_d is not None:
-                        df_d.to_excel(writer, sheet_name=sheet_name, startcol=10, startrow=1, index=False)
-                    if df_e is not None:
-                        df_e.to_excel(writer, sheet_name=sheet_name, startcol=13, startrow=1, index=False)
+                    sheet_name = 'ריכוז נתונים'
+                    # כתיבת טבלאות לפי עמודות מבוקשות
+                    if dfs["A"] is not None: dfs["A"].to_excel(writer, sheet_name=sheet_name, startcol=1, startrow=1, index=False)
+                    if dfs["B"] is not None: dfs["B"].to_excel(writer, sheet_name=sheet_name, startcol=4, startrow=1, index=False)
+                    if dfs["C"] is not None: dfs["C"].to_excel(writer, sheet_name=sheet_name, startcol=7, startrow=1, index=False)
+                    if dfs["D"] is not None: dfs["D"].to_excel(writer, sheet_name=sheet_name, startcol=10, startrow=1, index=False)
+                    if dfs["E"] is not None: dfs["E"].to_excel(writer, sheet_name=sheet_name, startcol=13, startrow=1, index=False)
                     
-                    # הוספת כותרות ידניות מעל הטבלאות באקסל
                     workbook = writer.book
                     worksheet = writer.sheets[sheet_name]
-                    header_format = workbook.add_format({'bold': True, 'align': 'right'})
-                    worksheet.write(0, 1, "טבלה א - תשלומים צפויים", header_format)
-                    worksheet.write(0, 4, "טבלה ב - תנועות בקרן", header_format)
-                    worksheet.write(0, 7, "טבלה ג - דמי ניהול", header_format)
-                    worksheet.write(0, 10, "טבלה ד - מסלולי השקעה", header_format)
-                    worksheet.write(0, 13, "טבלה ה - פירוט הפקדות", header_format
+                    fmt = workbook.add_format({'bold': True, 'align': 'right'})
+                    
+                    # הוספת כותרות - תיקון הסוגריים כאן
+                    worksheet.write(0, 1, "טבלה א - תשלומים צפויים", fmt)
+                    worksheet.write(0, 4, "טבלה ב - תנועות בקרן", fmt)
+                    worksheet.write(0, 7, "טבלה ג - דמי ניהול", fmt)
+                    worksheet.write(0, 10, "טבלה ד - מסלולי השקעה", fmt)
+                    worksheet.write(0, 13, "טבלה ה - פירוט הפקדות", fmt)
+                    worksheet.set_right_to_left()
+
+                st.markdown("---")
+                st.download_button(
+                    label="📥 הורד קובץ Excel מאוחד",
+                    data=output.getvalue(),
+                    file_name="pension_unified_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
